@@ -13,14 +13,17 @@
 
 ## 2. P0：技术可行性验证（最高优先级）
 
-建议将 P0 控制为一个单独最小原型，首先解决“做得成、做得安全”而不是 UI 风格。P0 代码直接按 [架构 §3](ARCHITECTURE.md#3-模块结构) 的 crate 边界组织（不含 relay-cli），以免原型代码无法演进。
+建议将 P0 控制为一个单独最小原型，首先解决“做得成、做得安全”而不是 UI 风格。P0 代码直接按 [架构 §3](ARCHITECTURE.md#3-模块结构) 的 crate 边界组织（不含 cli），以免原型代码无法演进。
 
 ### P0-00 工程骨架
 
-- [ ] Cargo workspace、Rust 2024、MSRV 与 `rust-toolchain.toml`
-- [ ] CI：fmt、clippy、test、cargo-deny
-- [ ] Docker Compose 测试拓扑（OpenSSH A / B / C，A 与 B 网络隔离）
+- [x] Cargo workspace、Rust 2024、MSRV 与 `rust-toolchain.toml`
+- [x] CI 配置：fmt、clippy、test、cargo-deny（另含跨平台构建与 MSRV 检查）
+- [ ] Docker Compose 测试拓扑（OpenSSH A / B / C，A 与 B 网络隔离；配置和检查脚本已提供，待 Docker 环境实测）
 - [ ] 加密后端（aws-lc-rs / ring）在 Linux、WSL2、Windows 构建验证并锁定
+
+初始脚手架还提供四个工作空间的可运行外壳与本地只读目录浏览，实际支持范围及检查命令见
+[开发指南](DEVELOPMENT.md)。此实现不计作 SSH、PTY、SFTP 或传输验收完成。
 
 ### P0-01 SSH 连接和 Host Key
 

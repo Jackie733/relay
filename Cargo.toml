@@ -1,0 +1,33 @@
+[workspace]
+members = ["crates/common", "crates/ssh", "crates/transfer", "crates/tui"]
+default-members = ["crates/tui"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[workspace.dependencies]
+common = { version = "0.1.0-dev", path = "crates/common" }
+ssh = { version = "0.1.0-dev", path = "crates/ssh" }
+transfer = { version = "0.1.0-dev", path = "crates/transfer" }
+async-trait = "0.1.92"
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
+thiserror = "2.0.21"
+tokio = { version = "1.53.2", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
+tempfile = "3.27.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+
+[profile.release]
+lto = "thin"
+strip = true

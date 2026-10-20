@@ -2,6 +2,7 @@
 
 > 版本：0.2-draft · 2026-10-20 · 这是设计提案，不代表依赖已验证或代码已实现。
 > 0.2-draft 依据对 russh 0.64.1、russh-sftp 3.0.1、vt100 0.18.1 的源码阅读修订，详见 [调研 §5](RESEARCH.md#5-依赖源码核查2026-10)。
+> 初始 Cargo workspace 已按 §3 建立；当前仅实现本地只读浏览与 TUI 外壳，实际范围见 [开发指南](DEVELOPMENT.md)。下文完整接口和子系统仍为目标设计。
 
 ## 1. 架构目标与不可妥协的边界
 
@@ -34,11 +35,11 @@
 relay/
 ├── Cargo.toml             # workspace
 ├── crates/
-│   ├── relay-core/        # 领域类型、路径、错误分类、FileSystem trait、LocalFs、事件
-│   ├── relay-ssh/         # 配置解析、主机信任、认证、Connection、PTY、SFTP 适配（RemoteFs）
-│   ├── relay-transfer/    # Job 规划、调度、流式管道、提交协议、校验（只依赖 relay-core）
-│   ├── relay-tui/         # 二进制 `relay`：App 状态、输入路由、终端仿真、控件、服务编排
-│   └── relay-cli/         # 0.2 引入；届时把服务编排抽出为 relay-app
+│   ├── common/      # 领域类型、路径、错误分类、FileSystem trait、LocalFs、事件
+│   ├── ssh/         # 配置解析、主机信任、认证、Connection、PTY、SFTP 适配（RemoteFs）
+│   ├── transfer/    # Job 规划、调度、流式管道、提交协议、校验（只依赖 common）
+│   ├── tui/         # 二进制 `relay`：App 状态、输入路由、终端仿真、控件、服务编排
+│   └── cli/         # 0.2 引入；届时把服务编排抽出为 app
 └── tests/
     └── integration/       # Docker OpenSSH + 自建异常 SFTP 服务器 + 故障注入
 ```
@@ -46,13 +47,13 @@ relay/
 依赖方向（单向，禁止反向）：
 
 ```text
-relay-tui ──► relay-transfer ──► relay-core
-    │                               ▲
-    └──────► relay-ssh ─────────────┘
+tui ──► transfer ──► common
+ │                   ▲
+ └────► ssh ─────────┘
 ```
 
-- `relay-transfer` **不依赖** `relay-ssh`：它只操作 `dyn FileSystem`，由上层通过 `FsResolver`（`Location → Arc<dyn FileSystem>`）注入。这样传输引擎可以用内存文件系统做单元测试，也能复用到 CLI。
-- 服务编排（SessionManager、TransferScheduler 的创建与连线、Prompt 路由）在 MVP 阶段放在 `relay-tui::services` 模块，**该模块不得依赖 ratatui**，以便 0.2 平移到 `relay-app`。
+- `transfer` **不依赖** `ssh`：它只操作 `dyn FileSystem`，由上层通过 `FsResolver`（`Location → Arc<dyn FileSystem>`）注入。这样传输引擎可以用内存文件系统做单元测试，也能复用到 CLI。
+- 服务编排（SessionManager、TransferScheduler 的创建与连线、Prompt 路由）在 MVP 阶段放在 `tui::services` 模块，**该模块不得依赖 ratatui**，以便 0.2 平移到 `app`。
 - 首期不引入动态插件、远端守护进程及事件溯源系统。
 
 ### 3.1 依赖候选
@@ -78,7 +79,7 @@ relay-tui ──► relay-transfer ──► relay-core
 ## 4. 运行时与事件模型
 
 ```text
-               ┌──────────────────────── relay-tui ───────────────────────┐
+               ┌──────────────────────── tui ─────────────────────────────┐
  crossterm ──► │ Input Router ─► Action ─► reduce(AppState) ─► render()   │
  EventStream   │      ▲                         │ Effect                   │
                │      │ AppEvent (bounded mpsc) ▼                          │
@@ -130,7 +131,7 @@ MVP 支持的指令与处理方式：
 
 ### 5.3 主机密钥信任（自研模块）
 
-russh 自带的 known_hosts 函数仅支持精确主机名与哈希条目，不支持通配符/否定模式、`@revoked`、`@cert-authority`、全局文件，按单个空格切分字段，且“不同算法的已知密钥”被当作“未知主机”。因此 Relay 自行实现 `relay-ssh::trust`：
+russh 自带的 known_hosts 函数仅支持精确主机名与哈希条目，不支持通配符/否定模式、`@revoked`、`@cert-authority`、全局文件，按单个空格切分字段，且“不同算法的已知密钥”被当作“未知主机”。因此 Relay 自行实现 `ssh::trust`：
 
 - **查找键**：`HostKeyAlias`（若配置）或实际连接的主机名，加端口（非 22 时为 `[host]:port`）；与 HostId 无关。
 - **读取来源**：`UserKnownHostsFile`（默认 `~/.ssh/known_hosts`、`known_hosts2`）、`GlobalKnownHostsFile`（默认 `/etc/ssh/ssh_known_hosts`）、Relay 信任库。支持哈希、通配符、否定、制表符分隔。
@@ -398,7 +399,7 @@ Windows/WSL2：Windows 路径、WSL 路由和 DNS 需要分别验证；WSL2 内�
 | --- | --- | --- |
 | ADR-001 | 不 Fork termscp | 它以文件传输 Activity 为中心，后台队列与 PTY 需要大重构 |
 | ADR-002 | 只做 SSH / SFTP | 让 MVP 规模可控 |
-| ADR-003 | 传输 Core 不依赖 TUI，也不依赖 relay-ssh | 长任务和 CLI 可复用；可用内存文件系统测试 |
+| ADR-003 | 传输 Core 不依赖 TUI，也不依赖 ssh | 长任务和 CLI 可复用；可用内存文件系统测试 |
 | ADR-004 | 远程互传优先内存中继 | 不要求两台远端直接互通、不分发凭证 |
 | ADR-005 | Tailscale 作为网络接入 | 无需自行实现 WireGuard 或额外服务 |
 | ADR-006 | 主机密钥严格验证 | 避免中间人攻击及不可信连接 |

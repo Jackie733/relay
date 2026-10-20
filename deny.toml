@@ -1,0 +1,20 @@
+[graph]
+all-features = true
+
+[advisories]
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "Unicode-3.0", "Zlib"]
+confidence-threshold = 0.9
+
+# The repository has no chosen code license and is not published.
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

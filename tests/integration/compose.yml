@@ -1,0 +1,43 @@
+name: relay-integration
+
+x-sshd: &sshd
+  build: .
+  image: relay-test-sshd:local
+  healthcheck:
+    test: [CMD-SHELL, "ssh-keyscan -T 2 127.0.0.1 2>/dev/null | grep -q ssh-ed25519"]
+    interval: 2s
+    timeout: 3s
+    retries: 20
+
+services:
+  openssh-a:
+    <<: *sshd
+    ports: ["127.0.0.1:2221:22"]
+    networks: [host-a]
+    volumes:
+      - ./.fixtures/id_ed25519.pub:/etc/relay/authorized_keys:ro
+      - keys-a:/etc/relay/keys
+  openssh-b:
+    <<: *sshd
+    ports: ["127.0.0.1:2222:22"]
+    networks: [host-b]
+    volumes:
+      - ./.fixtures/id_ed25519.pub:/etc/relay/authorized_keys:ro
+      - keys-b:/etc/relay/keys
+  openssh-c:
+    <<: *sshd
+    ports: ["127.0.0.1:2223:22"]
+    networks: [host-c]
+    volumes:
+      - ./.fixtures/id_ed25519.pub:/etc/relay/authorized_keys:ro
+      - keys-c:/etc/relay/keys
+
+networks:
+  host-a: {}
+  host-b: {}
+  host-c: {}
+
+volumes:
+  keys-a: {}
+  keys-b: {}
+  keys-c: {}

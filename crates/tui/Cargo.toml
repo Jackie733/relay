@@ -1,0 +1,25 @@
+[package]
+name = "tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "relay"
+path = "src/main.rs"
+
+[dependencies]
+common.workspace = true
+ssh.workspace = true
+transfer.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true
+ratatui.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+Port 22
+ListenAddress 0.0.0.0
+HostKey /etc/relay/keys/ssh_host_ed25519_key
+AuthorizedKeysFile /etc/relay/authorized_keys
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+AllowUsers relay
+AllowAgentForwarding no
+AllowTcpForwarding no
+X11Forwarding no
+UsePAM no
+PrintMotd no
+Subsystem sftp internal-sftp
