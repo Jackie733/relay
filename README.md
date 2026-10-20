@@ -47,7 +47,7 @@ Relay（暂定产品名）是一款计划使用 Rust 构建的、以键盘操作
 | --- | --- |
 | [产品需求与边界](docs/PRODUCT.md) | 用户、场景、功能优先级、范围及验收 |
 | [交互设计](docs/UX.md) | 布局、焦点、键盘、终端模式、拖入文件 |
-| [技术架构](docs/ARCHITECTURE.md) | SSH/PT​​Y、SFTP、文件系统、传输引擎、Tailscale |
+| [技术架构](docs/ARCHITECTURE.md) | SSH/PTY、SFTP、文件系统、传输引擎、Tailscale |
 | [安全设计](docs/SECURITY.md) | 主机校验、身份凭据、路径及覆盖保护 |
 | [开发路线](docs/ROADMAP.md) | P0 原型、MVP、后续迭代及完成定义 |
 | [测试与验收](docs/QUALITY.md) | 集成环境、功能矩阵、故障与性能要求 |
