@@ -28,7 +28,7 @@ Relay（暂定产品名）是一款计划使用 Rust 构建的、以键盘操作
 
 ```text
 ┌─ Relay ───────────────────────────────────────────────────────┐
-│ Hosts   Files   Terminals   Transfers                        │
+│ Hosts  [Files]  Terminals   Transfers                        │
 ├─────────────────────────────┬────────────────────────────────┤
 │ prod /var/www               │ backup /srv/backup             │
 │  ▸ dist/                    │    daily/                      │
@@ -47,7 +47,7 @@ Relay（暂定产品名）是一款计划使用 Rust 构建的、以键盘操作
 | --- | --- |
 | [产品需求与边界](docs/PRODUCT.md) | 用户、场景、功能优先级、范围及验收 |
 | [交互设计](docs/UX.md) | 布局、焦点、键盘、终端模式、拖入文件 |
-| [技术架构](docs/ARCHITECTURE.md) | SSH/PTY、SFTP、文件系统、传输引擎、Tailscale |
+| [技术架构](docs/ARCHITECTURE.md) | 术语、模块与运行时、SSH/主机信任、SFTP/文件系统、传输与提交协议、终端仿真、ADR |
 | [安全设计](docs/SECURITY.md) | 主机校验、身份凭据、路径及覆盖保护 |
 | [开发路线](docs/ROADMAP.md) | P0 原型、MVP、后续迭代及完成定义 |
 | [测试与验收](docs/QUALITY.md) | 集成环境、功能矩阵、故障与性能要求 |
@@ -55,7 +55,7 @@ Relay（暂定产品名）是一款计划使用 Rust 构建的、以键盘操作
 
 ## 技术方向（待 P0 验证）
 
-Rust 2024、Ratatui、Crossterm、Tokio、russh、SFTP 客户端库以及 VT 终端渲染组件。设计采用可共享的应用核心、独立 SSH 会话管理器、统一文件系统接口和后台任务引擎。具体依赖版本应在项目初始化时锁定，并在 P0 验证实际兼容性。
+Rust 2024、Ratatui、Crossterm、Tokio、russh、SFTP 客户端（优先自研精简 SFTP v3，P0 验证后定案，改造 russh-sftp 为备选）以及 VT 终端仿真组件。设计采用可共享的应用核心、独立 SSH 会话管理器、自研主机信任模块、统一文件系统接口和后台任务引擎。具体依赖版本应在项目初始化时锁定，并在 P0 验证实际兼容性。
 
 ## 目标平台
 
@@ -67,4 +67,4 @@ Rust 2024、Ratatui、Crossterm、Tokio、russh、SFTP 客户端库以及 VT 终
 
 ---
 
-文档版本：**0.1-draft** · 更新：**2026-10-20**。重要技术取舍以代码原型和测试验证为准。
+文档版本：**0.2-draft** · 更新：**2026-10-20**。重要技术取舍以代码原型和测试验证为准。

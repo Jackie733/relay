@@ -1,6 +1,6 @@
 # Relay 竞品与源码调研记录
 
-> 版本：0.1-draft · 2026-10-20 · 基于项目公开资料与 2026-10 对 termscp main 分支的源码阅读。此文用于解释产品决策，不是完整功能排行榜。
+> 版本：0.2-draft · 2026-10-20 · 基于项目公开资料、2026-10 对 termscp main 分支的源码阅读，以及对候选依赖（crates.io 发布版）的源码核查。此文用于解释产品决策，不是完整功能排行榜。
 
 ## 1. 核心结论
 
@@ -66,7 +66,22 @@ Relay 选择的组合重点是：**对等多主机工作空间 + 真正的 SSH P
 | Ratatui | https://ratatui.rs/ | Rust TUI 渲染框架 |
 | russh | https://github.com/Eugeny/russh | 原生 Rust SSH 客户端实现 |
 
-## 5. 对 Relay 的明确指导
+## 5. 依赖源码核查（2026-10）
+
+阅读的是 crates.io 上的发布版源码，结论只针对所列版本。
+
+| 依赖 | 版本 | 发现 | 对设计的影响 |
+| --- | --- | --- | --- |
+| russh | 0.64.1（Apache-2.0，MSRV 1.89） | `keys::known_hosts` 只做精确主机名/哈希匹配；按单个空格切分；不处理通配符、否定、`@revoked`、`@cert-authority`、全局文件；其他算法的已知密钥返回“未知” | 自研信任模块（ADR-009） |
+| russh | 同上 | Agent 客户端支持 Unix socket、Pageant、Windows 命名管道；默认加密后端 aws-lc-rs | 认证路径可行；构建后端需 P0 选择 |
+| russh-sftp | 3.0.1（Apache-2.0） | 路径与文件名为 `String`，反序列化用 `from_utf8_lossy`；支持多个未完成读请求；扩展含 limits / fsync / hardlink / statvfs / expand-path，无 posix-rename，但提供原始 `extended()` | 优先自研精简 v3，P0 验证后定案；改造本库为备选（ADR-010） |
+| vt100 | 0.18.1（MIT） | 暴露 application cursor / keypad、bracketed paste、mouse 模式；OSC 52 通过回调（默认不处理）；不应答 DA/DSR | 可支撑 Input Encoder；需补查询应答 |
+| tui-term | 0.3.4（MIT） | vt100 屏幕的 Ratatui 控件 | 渲染候选 |
+| alacritty_terminal | 0.26.0（Apache-2.0） | 更完整的终端仿真 | vt100 保真度不足时的备选 |
+| ssh2-config | 0.8.2（MIT） | OpenSSH 配置解析 | `ssh -G` 不可用时的后备 |
+| ratatui / crossterm | 0.30.2 / 0.29.0（MIT） | — | TUI 基础 |
+
+## 6. 对 Relay 的明确指导
 
 1. P0 必须验证真实 SSH PTY 而不是复用执行一次命令的终端组件。
 2. 第一天就将传输执行移出 UI，避免重蹈后台队列难以解耦的架构困境。
@@ -74,9 +89,10 @@ Relay 选择的组合重点是：**对等多主机工作空间 + 真正的 SSH P
 4. 首次连接和主机密钥变化要由安全策略处理，绝不能用无校验 Handler 换取“连得上”。
 5. 先精通 SSH/SFTP，不因 termscp 已支持 FTP/S3/SMB 就盲目复制广度。
 6. Tailscale 是现有 SSH 的网络可达性路径，先复用系统已建立的 Tailnet 连接。
+7. 不默认信任依赖的安全相关实现（known_hosts、路径编码）；关键安全不变量由 Relay 自己的代码和测试保证。
 
 ### 研究局限
 
-这是源码与文档层面的静态研究，**没有**在本仓库运行上述第三方应用、完成同环境性能比较或做审计级安全评估。依赖 API 与具体兼容性均应由 [P0 技术验证](ROADMAP.md) 再确认。
+这是源码与文档层面的静态研究，**没有**在本仓库运行上述第三方应用或依赖、完成同环境性能比较或做审计级安全评估。依赖 API 与具体兼容性均应由 [P0 技术验证](ROADMAP.md) 再确认。
 
 相关：[产品](PRODUCT.md) · [架构](ARCHITECTURE.md) · [安全](SECURITY.md)

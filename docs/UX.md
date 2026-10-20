@@ -1,18 +1,41 @@
 # Relay TUI 交互设计
 
-> 版本：0.1-draft · 2026-10-20 · 以下布局为规划，不是已实现功能。
+> 版本：0.2-draft · 2026-10-20 · 以下布局为规划，不是已实现功能。
 
 ## 1. 交互目标
 
 让用户通过少量、可发现的按键，完成 **连接主机 → 使用 Shell → 浏览文件 → 跨主机复制 → 继续使用 Shell**。以焦点清晰、操作可撤销/可确认、进度永远可见为优先级，不追求信息密度最大化。
 
-## 2. 三个工作空间
+## 2. 四个工作空间
 
-### 2.1 Files — 双栏文件管理
+顶部标签栏固定为 `Hosts · Files · Terminals · Transfers`，任何工作空间底部都有一行全局任务摘要和当前输入模式提示。启动时进入 Hosts。
+
+### 2.1 Hosts — 主机与连接
 
 ```text
-┌─ Relay ─ Files ─ Terminals ─ Transfers ─────────────────────────┐
-│ Hosts:  prod ●  backup ●  local                                 │
+┌─ Relay ─ [Hosts] Files Terminals Transfers ─────────────────────┐
+│ / 搜索主机                                                       │
+├──────────────────────────────┬──────────────────────────────────┤
+│ ● prod        ssh:prod       │ prod                             │
+│ ● backup      ssh:backup     │ ubuntu@10.0.0.12:22              │
+│ ○ nas         saved          │ 认证：Agent → ~/.ssh/id_ed25519   │
+│ ✗ old-box     ssh:old-box    │ 状态：Connected                  │
+│                              │ 不支持的配置：ProxyCommand        │
+├──────────────────────────────┴──────────────────────────────────┤
+│ Enter 连接/打开终端 · f 在文件中打开 · a 新增 · e 编辑 · ? 帮助   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+- 列表合并 SSH 配置别名（`ssh:`，只读）、Relay 保存的主机（`saved`）与最近连接；来源始终标注。
+- 详情显示：目标/用户/端口、认证方式概要、连接状态、错误原因、**不支持或被忽略的配置指令**。
+- 连接状态：Unknown / Connecting / Connected / AuthFailed / HostKeyUnknown / HostKeyMismatch / NetworkError / Disconnected。状态同时用图标和文字表达，不只靠颜色。
+- 首次出现的 Host Key 不自动接受：模态框显示主机名、地址、端口、算法、SHA-256 指纹；如存在其他算法的已知密钥，用醒目文案提示风险。
+- Tailscale 主机初期属于普通 SSH Host，其 IP/MagicDNS 与常规域名一样管理；不把“Tailnet 在线”误写为“SSH 可用”。
+
+### 2.2 Files — 双栏文件管理
+
+```text
+┌─ Relay ─ Hosts [Files] Terminals Transfers ─────────────────────┐
 ├────────────────────────────┬───────────────────────────────────┤
 │ [prod ▾] /var/www          │ [backup ▾] /srv/backup            │
 │ > dist/                    │   daily/                          │
@@ -20,94 +43,121 @@
 │   data.tar.zst             │   README                          │
 │   config.json              │                                   │
 ├────────────────────────────┴───────────────────────────────────┤
-│ Task #12 prod → backup  data.tar.zst  58%  18.4 MB/s            │
-│ Tab focus · Space mark · F5 copy · / filter · ? help            │
+│ #12 prod → backup  data.tar.zst  58%  18.4 MB/s     [Control]   │
+│ Tab 切换栏 · Space 标记 · c 复制 · / 过滤 · ? 帮助              │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-两栏对等，均有独立 HostId、当前路径、排序、过滤、选中项及滚动位置。可使用本机 ↔ 远程、远程 A ↔ B，或同一远程主机两个目录。
+两栏对等，均有独立 Location、当前路径、排序、过滤、选中项及滚动位置。可使用本机 ↔ 远程、远程 A ↔ B，或同一远程主机两个目录。
 
-- 主机选择控件显示名称、连接状态和连接错误；
+- 主机选择器（`o`）列出本机与所有主机；选择未连接的主机会触发连接流程；
 - 被聚焦面板边框与高亮明显，另一栏降低强调；
-- 复制前弹窗显示来源、目标、条目数与冲突策略；
+- 目录加载为异步分批：显示“加载中 n 项…”，可用 `Esc` 取消，不冻结界面；
+- 无法安全表示的文件名（如非 UTF-8）以转义形式显示并带 `⚠` 标记，只允许查看属性；
+- 复制前弹窗显示来源、目标、条目数与冲突策略（见 §5）；
 - 后台传输只有一个全局任务来源，不依赖当前面板是否还打开；
-- 窄窗口降级为单栏浏览 + 通过 Tab 切换目标；最小终端尺寸不足时提示，而非 panic。
+- 窄窗口（< 100 列）降级为单栏浏览 + `Tab` 切换两栏；小于最小尺寸（候选 60×16）时显示提示，而非 panic。
 
-### 2.2 Terminals — 真实 SSH PTY
+### 2.3 Terminals — 真实 SSH PTY
 
 ```text
-┌─ Relay / Terminals ────────────────────────────────────────────┐
-│ [prod ●] [backup ●] [+]                                        │
+┌─ Relay ─ Hosts Files [Terminals] Transfers ────────────────────┐
+│ [prod ●] [prod#2 ●] [backup ✗] [+]                             │
 ├────────────────────────────────────────────────────────────────┤
 │ ubuntu@prod:~$ htop                                            │
 │ ...（持续 PTY 数据流，不是一次性 exec 输出）...                │
 │                                                                │
 ├────────────────────────────────────────────────────────────────┤
-│ F12: Relay 控制模式  │  当前：Terminal Input                    │
+│ [TERMINAL] F12 → Relay 控制      #12 58%                       │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-PTY 聚焦时，原则上所有可表达的键盘事件都发送给远程应用。禁止把 `Esc`、`Ctrl+C`、方向键等当成 TUI 全局操作而破坏 `vim`、`tmux`、`htop`。初步选择 **F12 作为从远程输入切换到 Relay 控制模式的唯一保留键**，须经过 Linux/Windows Terminal/WSL2/macOS 兼容性验证，并提供可配置替代。
+PTY 聚焦时，所有可表达的键盘事件都发送给远程应用。禁止把 `Esc`、`Ctrl+C`、方向键等当成 TUI 全局操作而破坏 `vim`、`tmux`、`htop`。
 
-- Terminal Input：按键发给 PTY；窗口尺寸改变时通知 SSH 服务端；
-- Relay Control：允许切换 Tab、工作空间及面板；显式返回 Terminal Input；
-- SSH 断开：保留必要的滚动历史和原因展示，不假装远程进程仍然存活；
-- 可以在 Files 中选择主机后快捷打开对应终端；同一主机可有多个独立 Shell；
-- 对终端 escape sequences、剪贴板控制、超链接等进行安全策略限制。
+- 进入 Terminals 且存在活动 Tab 时，默认进入 Terminal Input 模式（可配置）；
+- 同一主机可有多个独立 Shell（`prod#2`）；从 Hosts / Files 可快捷打开对应主机的新终端；
+- SSH 断开：屏幕冻结并保留滚动历史，顶部横幅显示原因与“`r` 重新连接（新 Shell）”，不假装远程进程仍然存活；
+- 远端设置的窗口标题经清洗后显示在 Tab 上；响铃在非当前 Tab 上显示标记；
+- 远端请求写剪贴板（OSC 52）默认被拒绝，并在状态栏提示一次。
 
-### 2.3 Transfers — 独立任务视图
+### 2.4 Transfers — 独立任务视图
 
-显示任务 ID、来源、目标、状态、文件进度、总体进度、传输速度、累计字节与错误详情。功能包括查看、取消、对可重试错误重新运行；暂停/断点续传按路线图分期引入。
+显示任务 ID、来源、目标、状态、文件进度（n/m）、字节进度、速度、错误详情；选中任务可展开每个条目的结果（完成/跳过/失败及原因、残留临时文件）。
 
-任务状态至少区分：Queued、Preparing、Transferring、Verifying、Completed、Failed、Cancelled、Interrupted。UI 必须准确区分“部分写入”和“已提交完成”。
+操作：取消（`x`，需确认）、重试失败或中断的任务（`r`）、清除已结束任务。暂停/断点续传按路线图分期引入。
 
-## 3. 初步快捷键（MVP 候选）
+任务状态：Queued、Planning、AwaitingDecision、Running、Completed、CompletedWithIssues、Failed、Cancelled、Interrupted。UI 必须准确区分“部分写入”和“已提交完成”，并显示实际执行的完整性级别（Basic）。
+
+## 3. 输入模式与快捷键
+
+### 3.1 输入模式
+
+| 模式 | 进入方式 | 按键去向 | 状态栏 |
+| --- | --- | --- | --- |
+| Control | 默认；Terminal Input 中按逃逸键 | Relay 快捷键 | `[CONTROL]` |
+| Terminal Input | 在 Terminals 中按 `Enter` 或逃逸键 | 除逃逸键外全部发给远端 PTY | `[TERMINAL]` |
+| Text Input | `/` 过滤、重命名、表单字段 | 文本框；`Enter` 确认，`Esc` 取消 | `[INPUT]` |
+| Modal | 确认框、主机密钥、密码等提示 | 只响应框内按键 | 框内说明 |
+
+模式指示**始终可见**。`Ctrl+P`、数字键等全局快捷键只在 Control 模式生效，因此在过滤框中输入 `1` 或在 vim 中按 `Ctrl+P` 都不会被 Relay 截获。
+
+### 3.2 逃逸键
+
+- 默认候选 `F12`，**可在配置中更换**；P0 需验证 Linux 常见终端、Windows Terminal、WSL2、macOS Terminal / iTerm2 的兼容性。已知风险：Yakuake/Guake 默认用 F12 呼出窗口，macOS 上 F12 可能是媒体键。
+- 连续按两次逃逸键：向远端发送一次该键本身（远端应用确实需要它时）。
+- P0 结束时确定一个后备组合键写入默认配置，并在首次进入 Terminal Input 时提示当前逃逸键。
+
+### 3.3 快捷键（MVP 候选）
+
+主键使用字母，功能键作为别名（功能键可能被外层终端拦截，笔记本键盘也未必方便）。
 
 | 场景 | 按键 | 行为 |
 | --- | --- | --- |
-| Relay Control | `Tab` / `Shift+Tab` | 在当前可聚焦区域间切换 |
-| Relay Control | `Ctrl+P` | 命令面板、搜索操作与主机 |
-| Relay Control | `1` / `2` / `3` | Files / Terminals / Transfers |
-| Files | `j/k`、上下键 | 移动高亮 |
-| Files | `Enter` | 进入目录 / 预览条目（依类型） |
-| Files | `Backspace` | 返回上级目录 |
-| Files | `Space` | 标记/取消标记文件 |
-| Files | `F5` | 从当前面板复制到另一面板 |
-| Files | `F2` | 重命名 |
-| Files | `Delete` | 删除，必须确认 |
-| Files | `/` | 过滤当前目录 |
-| Relay Control | `?` | 快捷键和帮助 |
-| Terminal Input | `F12`（候选） | 进入 Relay Control |
-| Relay Control | `F12`（候选） | 返回 Terminal Input（当有终端） |
+| Control | `1` / `2` / `3` / `4` | Hosts / Files / Terminals / Transfers |
+| Control | `Tab` / `Shift+Tab` | 在当前工作空间的可聚焦区域间切换 |
+| Control | `Ctrl+P` | 命令面板：搜索操作与主机 |
+| Control | `?` | 快捷键与帮助（按当前工作空间过滤） |
+| Control | `q` | 退出（有活动任务时确认） |
+| 列表通用 | `j/k`、上下键、`g/G` | 移动高亮 / 首尾 |
+| 列表通用 | `/` | 过滤 |
+| Files | `Enter` / `Backspace` | 进入目录 / 返回上级 |
+| Files | `Space` | 标记/取消标记 |
+| Files | `o` | 切换当前栏的 Location |
+| Files | `i` | 查看属性 |
+| Files | `c` 或 `F5` | 从当前栏复制到另一栏 |
+| Files | `n` 或 `F7` | 新建目录 |
+| Files | `r` 或 `F2` | 重命名 |
+| Files | `d`、`Delete` 或 `F8` | 删除（必须确认） |
+| Files | `t` | 在当前主机打开新终端并进入当前目录（发送经 shell 转义的 `cd`；路径含控制字符时不提供） |
+| Terminals | `Enter` | 进入 Terminal Input |
+| Terminals | `[` / `]` | 上一个 / 下一个 Tab |
+| Terminals | `n` / `w` | 新建 Tab / 关闭 Tab（确认） |
+| Terminal Input | 逃逸键 | 返回 Control |
 
-注意：`Ctrl+P` 等组合键 **仅在 Relay Control 模式** 生效；PTY 模式须保留完整远程输入。终端外层可能拦截功能键，P0 必须验证并设计替代路径。
+所有按键可在 `config.toml` 中重新绑定；冲突在启动时报告。
 
-## 4. 主机与连接管理
+## 4. 鼠标
 
-- 入口为独立 Hosts 选择器，展示手动保存主机、SSH Config 别名与最近连接；
-- 连接卡片包含：别名、目标/用户名、认证方式概要、连接状态与错误原因；
-- 连接状态区分 Unknown / Connecting / Connected / AuthFailed / HostKeyMismatch / NetworkError；
-- 默认不自动接受首次出现的 Host Key；显示算法及指纹并要求确认；
-- Tailscale 主机初期属于普通 SSH Host，其 IP/MagicDNS 与常规域名一样管理；不把“Tailnet 在线”误写为“SSH 可用”。
+MVP 中鼠标只用于 Relay 自身（点击标签、选择列表行、滚动），不转发给远端 PTY；Terminal Input 模式下滚轮浏览本地滚动缓冲。远端鼠标转发留到 0.2。鼠标始终是可选增强，任何操作都有键盘路径。
 
 ## 5. 文件复制确认与破坏性操作
 
 确认框至少显示以下信息：
 
 ```text
-Copy 1 item
-From: prod:/var/www/data.tar.zst
-To:   backup:/srv/backup/data.tar.zst
+Copy 3 items (1 directory, 2 files, 1.2 GiB)
+From: prod:/var/www/{dist/, data.tar.zst, config.json}
+To:   backup:/srv/backup/
 Strategy: Relay via local memory
-Conflict: Ask before overwrite
+Conflicts: 1 file exists → [Overwrite] [Skip] [Cancel]   ☐ Apply to all
+Skipped:   2 symlinks (will be listed in the report)
 [Cancel] [Copy]
 ```
 
-- 目标已存在时先检查并明确执行冲突策略；
-- 误选同一路径时拒绝复制，防止截断源文件；
-- 不可保证原子覆盖时须显式提示；在 MVP 中倾向拒绝危险覆盖；
-- 删除目录需显示递归影响并有确认；不可在后台无提示地删除；
-- 错误消息给出“发生了什么、影响哪个路径、接下来能做什么”。
+- 冲突在此处一次性决定；目标服务器不支持原子覆盖时，“覆盖”选项不可用并说明原因；
+- 误选同一路径或把目录复制到自身内部时拒绝复制，防止截断或无限递归；
+- 删除目录需显示递归影响（条目数量）并确认；不可在后台无提示地删除；
+- 错误消息给出“发生了什么、影响哪个主机和路径、接下来能做什么”。
 
 ## 6. 文件拖入（非 MVP，增强功能）
 
@@ -121,7 +171,7 @@ Conflict: Ask before overwrite
 
 ## 7. 视觉规范
 
-优先暗色主题，清晰的焦点边框、选中行、状态图标和分层文本。避免闪烁、频繁全屏重绘和过度彩色装饰。颜色不应是表达连接状态或失败状态的唯一手段；保持 ASCII/Unicode 退化能力。布局必须在 80 列、120 列等尺寸下测试。
+优先暗色主题，清晰的焦点边框、选中行、状态图标和分层文本。避免闪烁、频繁全屏重绘和过度彩色装饰。颜色不应是表达连接状态或失败状态的唯一手段；保持 ASCII/Unicode 退化能力（`●○✗⚠` 均有 ASCII 替代）。CJK 等宽字符需正确计算列宽。布局必须在 80×24、120×40 等尺寸下测试。
 
 ## 8. 交互验收
 
@@ -129,6 +179,7 @@ Conflict: Ask before overwrite
 2. `vim` 的 `Esc`、`Ctrl+C`、`Ctrl+P` 等在 Terminal Input 时可按远程应用预期工作。
 3. 大文件传输中可以继续切换工作空间、使用 Shell、浏览其他目录。
 4. 任何破坏性操作都能识别作用主机与完整目标路径。
-5. 不支持拖拽的终端仍有等价的键盘路径。
+5. 不支持拖拽、功能键被拦截的终端仍有等价的键盘路径。
+6. 当前输入模式在任何时刻都可从屏幕上读出。
 
 相关：[PRD](PRODUCT.md) · [架构](ARCHITECTURE.md) · [测试](QUALITY.md)
