@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 common.workspace = true
 russh.workspace = true
 base64.workspace = true

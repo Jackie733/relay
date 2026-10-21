@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use common::{DirEntry, FileKind, FsPath, display_text};
+use common::{DirEntry, Endpoint, FileKind, FsPath, Location, display_text};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::{
@@ -29,7 +29,8 @@ pub enum Workspace {
 }
 
 pub struct Panel {
-    pub path: PathBuf,
+    pub location: Location,
+    pub path: FsPath,
     pub entries: Vec<DirEntry>,
     pub selected: usize,
     pub pending: Option<u64>,
@@ -37,14 +38,20 @@ pub struct Panel {
 }
 
 impl Panel {
-    fn new(path: PathBuf) -> Self {
+    fn new(endpoint: Endpoint) -> Self {
         Self {
-            path,
+            location: endpoint.location().clone(),
+            path: endpoint.path().clone(),
             entries: Vec::new(),
             selected: 0,
             pending: None,
             error: None,
         }
+    }
+
+    pub fn endpoint(&self) -> Endpoint {
+        Endpoint::new(self.location.clone(), self.path.clone())
+            .expect("panel location and path are kept consistent")
     }
 }
 
@@ -68,9 +75,10 @@ pub struct App {
 
 impl App {
     pub fn new(path: PathBuf) -> Self {
+        let endpoint = Endpoint::local(path);
         Self {
             workspace: Workspace::default(),
-            panels: [Panel::new(path.clone()), Panel::new(path)],
+            panels: [Panel::new(endpoint.clone()), Panel::new(endpoint)],
             focus: 0,
             help: false,
             quit: false,
@@ -201,15 +209,21 @@ impl App {
         }
     }
 
-    pub fn load(&mut self, panel: usize, path: PathBuf) -> Command {
+    pub fn load_endpoint(&mut self, panel: usize, endpoint: Endpoint) -> Command {
         self.request += 1;
+        self.panels[panel].location = endpoint.location().clone();
         self.panels[panel].pending = Some(self.request);
         self.panels[panel].error = None;
         Command {
             panel,
             request: self.request,
-            path,
+            endpoint,
         }
+    }
+
+    #[cfg(test)]
+    pub fn load(&mut self, panel: usize, path: PathBuf) -> Command {
+        self.load_endpoint(panel, Endpoint::local(path))
     }
 
     pub fn apply(&mut self, event: AppEvent) {
@@ -222,7 +236,8 @@ impl App {
         panel.pending = None;
         match event.result {
             Ok(entries) => {
-                panel.path = event.path;
+                panel.location = event.endpoint.location().clone();
+                panel.path = event.endpoint.path().clone();
                 panel.entries = entries;
                 panel.selected = 0;
                 panel.error = None;
@@ -230,7 +245,7 @@ impl App {
             Err(error) => {
                 panel.error = Some(format!(
                     "{}: {}",
-                    display_text(&event.path.to_string_lossy()),
+                    event.endpoint.path().display_name(),
                     display_text(&error.to_string())
                 ))
             }
@@ -310,21 +325,21 @@ impl App {
             KeyCode::Enter if panel.pending.is_none() => {
                 if let Some(entry) = panel.entries.get(panel.selected)
                     && entry.kind == FileKind::Directory
-                    && let FsPath::Local(path) = &entry.path
+                    && let Ok(endpoint) = Endpoint::new(panel.location.clone(), entry.path.clone())
                 {
-                    let path = path.clone();
-                    return Some(self.load(self.focus, path));
+                    return Some(self.load_endpoint(self.focus, endpoint));
                 }
             }
             KeyCode::Backspace if panel.pending.is_none() => {
-                if let Some(parent) = panel.path.parent() {
-                    let path = parent.to_path_buf();
-                    return Some(self.load(self.focus, path));
+                if let Some(parent) = panel.path.parent()
+                    && let Ok(endpoint) = Endpoint::new(panel.location.clone(), parent)
+                {
+                    return Some(self.load_endpoint(self.focus, endpoint));
                 }
             }
             KeyCode::Char('r') if panel.pending.is_none() => {
-                let path = panel.path.clone();
-                return Some(self.load(self.focus, path));
+                let endpoint = panel.endpoint();
+                return Some(self.load_endpoint(self.focus, endpoint));
             }
             _ => {}
         }
@@ -335,7 +350,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::FsError;
+    use common::{FsError, HostId, Metadata, RemotePath};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -365,41 +380,76 @@ mod tests {
         app.apply(AppEvent {
             panel: 0,
             request: stale.request,
-            path: stale.path,
+            endpoint: stale.endpoint,
             result: Ok(vec![]),
         });
         assert_eq!(app.panels[0].pending, Some(fresh.request));
         app.apply(AppEvent {
             panel: 0,
             request: fresh.request,
-            path: fresh.path,
+            endpoint: fresh.endpoint,
             result: Err(FsError::UnsafePath),
         });
-        assert_eq!(app.panels[0].path, PathBuf::from("/original"));
+        assert_eq!(
+            app.panels[0].path,
+            FsPath::Local(PathBuf::from("/original"))
+        );
         assert!(app.panels[0].error.is_some());
         assert!(app.panels[0].pending.is_none());
     }
 
     #[test]
-    fn file_navigation_only_opens_directories() {
+    fn file_navigation_only_opens_directories_for_local_and_remote_panes() {
         let mut app = App::new("/tmp".into());
         app.workspace = Workspace::Files;
-        app.panels[0].entries.push(DirEntry {
-            name: "child".into(),
-            path: FsPath::Local("/tmp/child".into()),
-            kind: FileKind::Directory,
-        });
+        app.panels[0].entries.push(DirEntry::new_local(
+            "child".into(),
+            "/tmp/child".into(),
+            Metadata {
+                kind: FileKind::Directory,
+                ..Metadata::default()
+            },
+        ));
         let command = app.key(key(KeyCode::Enter)).unwrap();
-        assert_eq!(command.path, PathBuf::from("/tmp/child"));
+        assert_eq!(command.endpoint, Endpoint::local("/tmp/child"));
         assert!(app.key(key(KeyCode::Enter)).is_none());
         app.apply(AppEvent {
             panel: command.panel,
             request: command.request,
-            path: command.path,
+            endpoint: command.endpoint,
             result: Ok(vec![]),
         });
         let parent = app.key(key(KeyCode::Backspace)).unwrap();
-        assert_eq!(parent.path, PathBuf::from("/tmp"));
+        assert_eq!(parent.endpoint, Endpoint::local("/tmp"));
+
+        // Remote panel navigation preserves RemotePath bytes.
+        let host = HostId("ssh:prod".into());
+        let remote_root = RemotePath::from_posix("/srv").unwrap();
+        let remote_child = remote_root.join(b"logs-\xff").unwrap();
+        app.panels[1].location = Location::Remote(host.clone());
+        app.panels[1].path = FsPath::Remote(remote_root.clone());
+        app.panels[1].entries.push(DirEntry::new_remote(
+            b"logs-\xff".to_vec(),
+            remote_child.clone(),
+            Metadata {
+                kind: FileKind::Directory,
+                ..Metadata::default()
+            },
+        ));
+        app.key(key(KeyCode::Tab));
+        let remote_open = app.key(key(KeyCode::Enter)).unwrap();
+        assert_eq!(
+            remote_open.endpoint,
+            Endpoint::remote(host.clone(), remote_child.clone())
+        );
+        app.apply(AppEvent {
+            panel: 1,
+            request: remote_open.request,
+            endpoint: remote_open.endpoint,
+            result: Ok(vec![]),
+        });
+        let remote_parent = app.key(key(KeyCode::Backspace)).unwrap();
+        assert_eq!(remote_parent.endpoint, Endpoint::remote(host, remote_root));
     }
 
     #[test]

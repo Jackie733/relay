@@ -63,7 +63,7 @@ tui ──► transfer ──► common
 | TUI | Ratatui 0.30 + Crossterm 0.29 | 渲染、输入、resize；评估 kitty keyboard 增强协议 |
 | Async | Tokio | SSH、文件 IO、任务队列；取消用 `tokio_util::sync::CancellationToken` |
 | SSH | russh 0.64（Apache-2.0，MSRV 1.89） | PTY、多 Channel、Agent（Unix socket / Pageant / Windows 命名管道）；加密后端 aws-lc-rs 与 ring 二选一（见 §13） |
-| SFTP | **优先自研精简 SFTP v3**：P0 验证后定案，改造 russh-sftp 3.0.1 为备选 | russh-sftp 以 `String` 表示路径并对非 UTF-8 文件名做有损解码，缺少 posix-rename，见 §6.3 |
+| SFTP | **自研精简 SFTP v3 客户端**（P0-03 已验证定案） | russh-sftp 以 `String` 表示路径并对非 UTF-8 文件名做有损解码，缺少 posix-rename；自研模块保持原始字节路径与有界流水线，见 §6.3 |
 | 主机信任 | **自研** known_hosts 模块 | russh 自带实现不支持通配符、`@revoked`、全局文件等，见 §5.3 |
 | 终端仿真 | vt100 0.18 + 自有 Ratatui 单元格渲染（P0-02 已定案） | vt100 暴露 DECCKM / 括号粘贴 / 备用屏幕模式；补充 DA/DSR 应答与宽字符边界裁剪，不引入绑定旧版 vt100 0.16 的 tui-term |
 | SSH 配置 | 优先 `ssh -G`；后备 ssh2-config 0.8 | 见 §5.1 |
@@ -243,6 +243,10 @@ russh-sftp 3.0.1 源码核查结论：
 
 自研范围限制为 MVP 必需操作及扩展。P0 验证非 UTF-8 文件名往返、1 GiB 吞吐与峰值内存、posix-rename 覆盖，并覆盖取消、断线、异常响应和原子覆盖失败；验证失败时先评估修复成本，无法可靠满足安全与资源约束则重新评估改造 russh-sftp。**无论选哪种，在字节路径可用之前：名称含 U+FFFD 的远程条目一律标记为“名称无法安全表示”，禁止对其执行任何写、删、改名、复制操作。**
 
+**P0-03 验证结论（2026-10-21）**：已在 `ssh::sftp` 实现自研精简 SFTP v3 客户端（`SftpClient` / `RemoteFs`），通过 `common::FileSystem` 与 `LocalFs` 共享统一文件接口。单帧上限 1 MiB、读写流水线各最多 8 个未完成分块（单块上限 `min(server_limits, 256 KiB)`），取消或 `Drop` 时自动异步发送 `SSH_FXP_CLOSE`。在真实 OpenSSH 容器与可编程 `Quirky-SFTP` 异常服务端上通过非 UTF-8 文件名往返、`posix-rename` 原子覆盖与不支持时的 `Unsupported` 拒绝、恶意目录项过滤、超长目录限制、断线与异常帧拒绝，以及 1 GiB 流式读写压测（Release 写 233.2 MiB/s、读 343.6 MiB/s，峰值 RSS 增量 804 KiB），正式定案采用自研 SFTP v3 客户端（ADR-010）。
+
+资源与取消约定：每个 SFTP 客户端最多接纳 64 个排队或待回复请求（含后台 `CLOSE`），发送队列容量为 32。请求期限从排队前计算，调用方取消后仍生效；超时会终止该 SFTP 通道、清空等待项并拒绝后续请求，不主动断开 SSH 会话。目录句柄在遍历取消及 `OPENDIR` 响应晚到时均有清理；后台关闭无法入队时关闭通道以释放远端资源。取消 `read_chunk` 后可重试，不丢失队首请求；预读结果超出本次 `max_bytes` 的部分留待下次返回，零长度读取不推进位置。块大小遵守服务端读写限制，并按 [OpenSSH limits 扩展](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL) 扣除完整包头及实际句柄开销；不能容纳数据的限制返回协议错误。本地 `set_metadata` 应用 `mtime` / `atime` 并保留未指定的时间字段；非 Unix 平台的 POSIX 权限修改返回 `Unsupported`。
+
 ### 6.4 跨平台文件名映射
 
 远端名称写入本机时（尤其 Windows）：拒绝保留名（`CON`、`NUL`、`COM1` 等）、非法字符（`<>:"\|?*`）、结尾的点或空格；目标文件系统大小写不敏感时检测同名冲突。MVP 对这些条目**拒绝并报告**，不自动改名。
@@ -414,7 +418,7 @@ Windows/WSL2：Windows 路径、WSL 路由和 DNS 需要分别验证；WSL2 内�
 | ADR-007 | CLI 延至 0.2 | 先验证真实 PTY + 传输并行体验 |
 | ADR-008 | 逃逸键可配置，默认同时启用 `F12` 与后备键 `Ctrl+]`（**已确认** 2026-10-21） | 避免与远端常用按键冲突；`F12` 被 Yakuake/Guake、macOS 媒体键拦截时可用 `Ctrl+]`（兼容传统 `0x1d`/`Ctrl+5` 与 kitty 协议），连按两次向远端透传 |
 | ADR-009 | 自研 known_hosts 解析与判定 | russh 实现不支持通配符、`@revoked`、全局文件，且误判算法变化 |
-| ADR-010 | 内部路径为字节；优先自研精简 SFTP v3，P0 Gate 后定案（方向已确认 2026-10-20） | 防止非 UTF-8 文件名被无声改写；改造 russh-sftp 为备选 |
+| ADR-010 | 内部路径为字节；采用自研精简 SFTP v3 客户端（**已确认** 2026-10-21） | P0-03 实测通过非 UTF-8 字节路径往返、`posix-rename` 原子覆盖、异常响应/断线/取消防护及 1 GiB 流式读写（峰值 RSS 增量 < 1 MiB），无需引入或改造 russh-sftp |
 | ADR-011 | 默认每主机单连接多 Channel，独立传输连接为可选项 | 避免重复认证；以 P0 延迟测量为准 |
 | ADR-012 | SSH 配置优先用 `ssh -G` 解析 | 与 OpenSSH 语义一致，避免重写 Include/Match |
 | ADR-013 | 冲突在 Planning 阶段决定，运行期不弹窗 | 后台任务不被交互阻塞；提交时的新冲突视为失败 |

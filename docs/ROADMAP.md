@@ -52,11 +52,13 @@ P0-02 结论（2026-10-21）：`vt100 0.18.1` 配合 `Responder`（仅根据本�
 
 ### P0-03 SFTP 文件接口
 
-- [ ] 列目录、stat、创建/读取/写入文件
-- [ ] 区分 Windows 本地路径和远程 POSIX 路径；远程路径以字节保存
-- [ ] 使用可控测试主机验证权限错误和目录不存在
-- [ ] **SFTP 客户端验证**：优先自研精简 SFTP v3（仅 MVP 必需操作及扩展，复用 russh SSH 层）；验证非 UTF-8 文件名往返、1 GiB 吞吐/峰值内存、posix-rename 覆盖，以及取消、断线、异常响应、原子覆盖失败；P0 Gate 后定案并更新 ADR-010，未通过则重新评估改造 russh-sftp
-- [ ] 能力探测：posix-rename、fsync、statvfs、limits
+- [x] 列目录、stat、创建/读取/写入文件
+- [x] 区分 Windows 本地路径和远程 POSIX 路径；远程路径以字节保存
+- [x] 使用可控测试主机验证权限错误和目录不存在
+- [x] **SFTP 客户端验证**：优先自研精简 SFTP v3（仅 MVP 必需操作及扩展，复用 russh SSH 层）；验证非 UTF-8 文件名往返、1 GiB 吞吐/峰值内存、posix-rename 覆盖，以及取消、断线、异常响应、原子覆盖失败；P0 Gate 后定案并更新 ADR-010，未通过则重新评估改造 russh-sftp
+- [x] 能力探测：posix-rename、fsync、statvfs、limits
+
+P0-03 结论（2026-10-21）：`ssh::sftp` 在 `russh` 会话通道上实现自研精简 SFTP v3 客户端（`SftpClient` / `RemoteFs`），与 `common::FileSystem` 及 `LocalFs` 对齐完整接口。路径与目录项名称全程按原始字节（`RemotePath` / `raw_name`）往返，过滤 `.`、`..`、空名及含 `/` 或 NUL 的恶意目录项，并对含 `U+FFFD` 替换字符的名称及 Windows 非法名执行写入/删除/改名拦截。实测通过真实 OpenSSH 容器与可编程 `Quirky-SFTP` 异常服务端验证：能力探测（`posix-rename@openssh.com`、`fsync@openssh.com`、`statvfs@openssh.com`、`limits@openssh.com`）、无 `posix-rename` 时拒绝 `AtomicReplace` 且不破坏旧文件、权限拒绝与目录不存在、非 UTF-8 文件名往返、取消后自动发送 `SSH_FXP_CLOSE`、断线与畸形/超长帧（> 1 MiB）保护；Release 模式下 1 GiB 流式写入耗时 4.39 s（233.2 MiB/s）、读取耗时 2.98 s（343.6 MiB/s），峰值 RSS 增量仅 804 KiB（读写流水线各上限 8 个 256 KiB 分块），无需引入或改造 `russh-sftp`（ADR-010 已定案）。
 
 ### P0-04 跨主机文件传输
 

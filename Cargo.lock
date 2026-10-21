@@ -2076,6 +2076,7 @@ checksum = "3a0219bd7d979d58245a4f41f695e1ac9f8befdffadd7f61f1bae9e39abc6620"
 name = "ssh"
 version = "0.1.0-dev"
 dependencies = [
+ "async-trait",
  "base64",
  "common",
  "hmac 0.12.1",

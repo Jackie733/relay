@@ -205,7 +205,10 @@ def smoke_ssh_pty(binary):
             expect("Type yes:")
             os.write(master, b"yes\n")
             expect_screen("[TERMINAL]")
-            os.write(master, b"echo smoke-pty-''ok\r")
+            os.write(
+                master,
+                b"mkdir -p ~/smoke-sftp-dir && touch ~/smoke-sftp-dir/smoke-remote.txt && echo smoke-pty-''ok\r",
+            )
             expect_screen("smoke-pty-ok")
             # Resize the outer Unix PTY and verify the remote SSH PTY receives it.
             screen.resize(34, 112)
@@ -214,14 +217,21 @@ def smoke_ssh_pty(binary):
             time.sleep(0.15)
             os.write(master, b"stty size\r")
             expect_screen("27 110")
-            # F12 returns to Control; 2 switches to Files; 3 + Enter re-focuses PTY.
+            # F12 returns to Control; 2 switches to Files; browse remote SFTP pane; 3 + Enter re-focuses PTY.
             os.write(master, b"\x1b[24~")
             expect_screen("[CONTROL]")
             os.write(master, b"2")
             expect_screen("Left Local")
+            expect_screen("Right p0:127.0.0.1:2221 /home/relay")
+            os.write(master, b"\t")
+            os.write(master, b"r")
+            expect_screen("smoke-sftp-dir")
+            os.write(master, b"jj\r")
+            expect_screen("smoke-remote.txt")
             os.write(master, b"3")
             os.write(master, b"\r")
             expect_screen("[TERMINAL]")
+            os.write(master, b"rm -rf ~/smoke-sftp-dir\r")
             # Fallback escape key Ctrl+] (0x1d) also returns to Control.
             os.write(master, b"\x1d")
             expect_screen("[CONTROL]")

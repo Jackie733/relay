@@ -1,26 +1,25 @@
 //! Service orchestration is independent of Ratatui, ready to move to app.
 
-use std::path::PathBuf;
-
-use common::{DirEntry, FileSystem, FsPath, FsResult, LocalFs};
+use common::{DirEntry, Endpoint, FsResolver, FsResult};
 use tokio::{sync::mpsc, task::JoinHandle};
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Command {
     pub panel: usize,
     pub request: u64,
-    pub path: PathBuf,
+    pub endpoint: Endpoint,
 }
 
 #[derive(Debug)]
 pub struct AppEvent {
     pub panel: usize,
     pub request: u64,
-    pub path: PathBuf,
+    pub endpoint: Endpoint,
     pub result: FsResult<Vec<DirEntry>>,
 }
 
 pub struct Services {
+    pub resolver: FsResolver,
     pub commands: mpsc::Sender<Command>,
     pub events: mpsc::Receiver<AppEvent>,
     worker: JoinHandle<()>,
@@ -28,15 +27,23 @@ pub struct Services {
 
 impl Services {
     pub fn start() -> Self {
+        Self::with_resolver(FsResolver::new())
+    }
+
+    pub fn with_resolver(resolver: FsResolver) -> Self {
         let (commands, mut receiver) = mpsc::channel::<Command>(8);
         let (sender, events) = mpsc::channel(8);
+        let worker_resolver = resolver.clone();
         let worker = tokio::spawn(async move {
             while let Some(command) = receiver.recv().await {
-                let result = LocalFs.read_dir(&FsPath::Local(command.path.clone())).await;
+                let result = match worker_resolver.resolve(command.endpoint.location()) {
+                    Ok(fs) => fs.read_dir(command.endpoint.path()).await,
+                    Err(error) => Err(error),
+                };
                 let event = AppEvent {
                     panel: command.panel,
                     request: command.request,
-                    path: command.path,
+                    endpoint: command.endpoint,
                     result,
                 };
                 if sender.send(event).await.is_err() {
@@ -45,6 +52,7 @@ impl Services {
             }
         });
         Self {
+            resolver,
             commands,
             events,
             worker,
@@ -70,12 +78,13 @@ mod tests {
             (1, root.path().to_path_buf(), true),
             (2, root.path().join("missing"), false),
         ] {
+            let endpoint = Endpoint::local(path);
             services
                 .commands
                 .send(Command {
                     panel: 1,
                     request,
-                    path: path.clone(),
+                    endpoint: endpoint.clone(),
                 })
                 .await
                 .unwrap();
@@ -84,7 +93,10 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-            assert_eq!((event.panel, event.request, event.path), (1, request, path));
+            assert_eq!(
+                (event.panel, event.request, event.endpoint),
+                (1, request, endpoint)
+            );
             assert_eq!(event.result.is_ok(), success);
         }
     }

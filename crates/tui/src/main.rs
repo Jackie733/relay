@@ -72,8 +72,23 @@ async fn run() -> Result<()> {
     let mut app = App::new(initial);
     app.escape_keys = args.escape_keys;
     let mut services = Services::start();
+    if let Some(connection) = &connection {
+        let remote_fs = connection.open_sftp().await?;
+        let dot = common::FsPath::Remote(common::RemotePath::from_posix(".")?);
+        let remote_path = common::FileSystem::canonicalize(&remote_fs, &dot)
+            .await
+            .unwrap_or_else(|_| common::FsPath::Remote(common::RemotePath::root()));
+        let host_id = connection.host().id.clone();
+        services
+            .resolver
+            .register_remote(host_id.clone(), Arc::new(remote_fs));
+        let remote_endpoint =
+            common::Endpoint::new(common::Location::Remote(host_id), remote_path)?;
+        app.panels[1].location = remote_endpoint.location().clone();
+        app.panels[1].path = remote_endpoint.path().clone();
+    }
     for panel in 0..2 {
-        let command = app.load(panel, app.panels[panel].path.clone());
+        let command = app.load_endpoint(panel, app.panels[panel].endpoint());
         services.commands.try_send(command)?;
     }
 

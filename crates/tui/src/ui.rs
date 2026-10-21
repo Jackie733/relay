@@ -263,9 +263,10 @@ fn panel(frame: &mut Frame, area: Rect, app: &App, index: usize) {
         Color::DarkGray
     };
     let title = format!(
-        " {} Local {} ",
+        " {} {} {} ",
         if index == 0 { "Left" } else { "Right" },
-        display_text(&panel.path.to_string_lossy())
+        display_text(panel.location.label()),
+        panel.path.display_name()
     );
     let block = Block::bordered()
         .title(title)

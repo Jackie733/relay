@@ -2,24 +2,24 @@
 
 ## 当前交付范围
 
-当前已完成工程基线、P0-01 SSH 连接原型与 P0-02 交互式 PTY 终端，完整 P0 Gate 尚未通过。
+当前已完成工程基线、P0-01 SSH 连接原型、P0-02 交互式 PTY 终端与 P0-03 SFTP 文件接口，完整 P0 Gate 尚未通过。
 
 - Rust 2024 Cargo workspace；开发工具链固定为 1.97.1，MSRV 为 1.89。
 - `relay` 启动后默认进入 Hosts；`1/2/3/4` 切换四个工作空间。
-- Files 两栏独立浏览本机目录，支持进入目录、返回上级、刷新、首尾跳转。
-- 目录读取在独立服务任务中执行，通过有界消息队列更新界面。
+- Files 两栏可独立绑定本机（`LocalFs`）或远端 SFTP（`RemoteFs`）目录，支持进入目录、返回上级、刷新、首尾跳转（使用 `--ssh` 或 `--ssh-config` 启动时，左栏为 Local，右栏自动挂载远端 SFTP 主目录）。
+- 目录读取在独立服务任务中通过 `FsResolver` 执行，经有界消息队列更新界面。
 - 读取失败保留原路径；旧请求的迟到结果不会覆盖新请求。
 - 小于 100 列只显示聚焦栏；小于 60×16 显示扩窗提示。
 - `?` 帮助不会遮挡模式状态栏；正常退出、返回错误及 panic 有终端恢复路径。
-- 本地名称保留 `OsString`，远端路径保留原始字节；显示时转义控制字符。
+- 本地名称保留 `OsString`，远端路径保留原始字节（`RemotePath` / `raw_name`）；显示时转义控制字符，含 `U+FFFD` 替换字符的名称及 Windows 非法名禁止修改操作。
 - 已提供三台 OpenSSH 测试主机的 Docker 配置和临时测试密钥生成脚本。
-- `ssh` crate 支持主机信任校验、显式首次确认、加密/未加密 OpenSSH 私钥认证，以及长期交互式 PTY Channel（`xterm-256color`、窗口大小同步、退出状态回报）。
-- `ssh -G` 与不执行命令的后备配置解析器已对照测试；可通过 `relay --ssh ...` 或 `relay --ssh-config ...` 打开交互式 SSH 终端（连接前在控制终端完成主机密钥或私钥口令确认）。
+- `ssh` crate 支持主机信任校验、显式首次确认、加密/未加密 OpenSSH 私钥认证、长期交互式 PTY Channel（`xterm-256color`、窗口大小同步、退出状态回报），以及自研精简 SFTP v3 客户端（`SftpClient` / `RemoteFs`，支持列目录、`stat`/`lstat`、`canonicalize`、创建/删除目录与文件、有界流水线流式读写、`NoReplace` 与 `posix-rename@openssh.com` `AtomicReplace` 重命名、`fsync@openssh.com`、`statvfs@openssh.com`、`limits@openssh.com` 能力探测）。
+- `ssh -G` 与不执行命令的后备配置解析器已对照测试；可通过 `relay --ssh ...` 或 `relay --ssh-config ...` 打开交互式 SSH 终端与远端 SFTP 浏览（连接前在控制终端完成主机密钥或私钥口令确认）。
 - `tui` 集成 `vt100 0.18.1`、设备查询应答器（DA1/DA2/DSR/CPR/XTWINOPS 18）、安全策略（OSC 52 拦截、OSC 0/2 标题清洗）、`Input Encoder`（DECCKM、xterm 修饰键、Alt 前缀、防注入括号粘贴）与 `Terminal Input` / `Control` 模式切换（默认同时启用 `F12` 与 `Ctrl+]`，连按两次透传，支持 `--escape-key`）。
 
-尚未实现：Hosts UI 的主机列表与模态框工作流、SSH Agent/密码/keyboard-interactive、SFTP、文件写入/复制/删除、
-传输调度、日志持久化、用户配置文件落盘。界面不会展示虚构的已连接主机或运行任务。
-已锁定 russh 0.64.1 + ring 0.17.14，禁用 russh 默认特性与 RSA；终端仿真已定案使用 `vt100 0.18.1`（ADR-018）。
+尚未实现：Hosts UI 的主机列表与模态框工作流、SSH Agent/密码/keyboard-interactive、跨主机传输调度（P0-04）、
+日志持久化、用户配置文件落盘。界面不会展示虚构的已连接主机或运行任务。
+已锁定 russh 0.64.1 + ring 0.17.14，禁用 russh 默认特性与 RSA；终端仿真已定案使用 `vt100 0.18.1`（ADR-018）；SFTP 客户端已定案采用自研精简 SFTP v3（ADR-010）。
 
 初始 `FileSystem` 仅有只读 `read_dir`；它暂时一次返回最多 10,000 项，超过时明确报错。
 目前串行处理目录请求，不支持读取中的取消。分批目录流、取消和写入能力随 P0-FS 引入，
@@ -170,6 +170,19 @@ cargo run --locked -- --ssh-config ALIAS /path/to/ssh_config [--fallback] [--esc
 ```
 
 原型边界：目前通过命令行参数在启动 TUI 前建立单条 P0 SSH PTY 会话，尚未接入 Hosts 工作空间与 TUI 模态框；下一步为 P0-03 SFTP 文件接口。
+
+### P0-03 SFTP 文件接口（2026-10-21）
+
+在上述 Linux 环境通过 51 项常规测试、4 项真实 OpenSSH 集成测试（`ssh` + `tui`）以及 Release 程序的真实 Unix PTY 端到端交互冒烟检查（含 SFTP 远端面板目录浏览），另通过格式检查、Clippy、发布构建、Rust 1.89 MSRV 检查与 cargo-deny 离线检查。
+
+实测验证：
+
+- `common::fs` 与 `common::path`：扩展完整 `FileSystem` trait（`read_dir`、`lstat`、`stat`、`canonicalize`、`create_dir`、`remove_file`、`remove_dir`、`rename`、`open_read`、`open_write`、`set_metadata`、`free_space`）、`Capabilities`、`Metadata`（自动剥离 setuid/setgid/sticky 位）、`RenameMode::{NoReplace, AtomicReplace}`、`FsResolver`，以及 Windows 保留名/非法字符/大小写折叠冲突校验与 `U+FFFD` 有损名称修改拦截。
+- `ssh::sftp`：在 `russh` 会话通道上实现自研精简 SFTP v3 客户端（`SftpClient` / `RemoteFs`），单帧上限 1 MiB，读写流水线各最多 8 个未完成请求，块大小按服务端 `limits@openssh.com` 与 256 KiB 上限协商；读取器/写入器 `Drop` 及目录读取取消时自动异步发送 `SSH_FXP_CLOSE`。
+- 审核修复新增 10 项回归测试：读取取消后重试保持完整字节序列，动态缩小读取上限及零长度读取不丢失预读数据，短读无重复/遗漏；目录遍历取消及 `OPENDIR` 句柄晚到均关闭句柄；每客户端最多 64 个排队/待回复请求，超时（含外部取消后的请求）终止 SFTP 通道并拒绝后续请求；小于 4 KiB 的服务端读写限制与完整包长上限均被遵守，不可用限制被拒绝；本地文件/目录时间戳正确修改并保留未指定字段。取消、超时和资源上限的约定见架构 §6.3。
+- 可编程 `Quirky-SFTP` 异常服务端测试：覆盖不广播扩展时 `AtomicReplace` 返回 `FsError::Unsupported`、`fsync` 返回 `SyncOutcome::Unsupported`、`statvfs` 返回 `None`；过滤 `.`、`..`、空名、含 `/` 或 NUL 的恶意目录项；超 10,000 项大目录报错并关闭句柄；超长帧头、未知 `request_id`、中途断线与慢响应取消。
+- 真实 OpenSSH 容器集成测试（`sftp_filesystem_and_1gib_streaming_against_real_openssh`）：验证能力探测、目录与文件增删改查、权限拒绝（`/root` 及 `0500` 目录）与路径不存在、非 UTF-8 文件名（`b"non-utf8-\xff-\xfe-\x80.bin"`）原样字节往返、`NoReplace` 与 `posix-rename` `AtomicReplace` 覆盖，以及 1 GiB 流式读写（Release 模式下写入耗时 4.39 s / 233.2 MiB/s，读取耗时 2.98 s / 343.6 MiB/s，峰值 RSS 增量 804 KiB；Debug 模式下峰值 RSS 增量 1292 KiB）。
+- 下一步为 P0-04 跨主机文件传输（Remote A → Relay 有界缓冲 → Remote B 及同连接/独立连接终端延迟测量）。
 
 本次变更的 Windows/macOS/WSL2 和远端 CI 尚待实际执行。
 

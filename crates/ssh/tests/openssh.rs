@@ -1,7 +1,10 @@
 //! Uses only disposable localhost fixtures and a temporary trust store.
 use std::{path::Path, process::Command, time::Duration};
 
-use common::HostId;
+use common::{
+    FileKind, FileSystem, FsError, FsPath, HostId, MetadataPatch, RemotePath, RenameMode,
+    SyncOutcome, WriteOptions,
+};
 use russh::{ChannelMsg, keys::PublicKey};
 use secrecy::SecretString;
 use ssh::{
@@ -333,5 +336,263 @@ async fn interactive_pty_against_real_openssh() {
         }
     }
     assert_eq!(status, Some(3));
+    connection.disconnect().await.unwrap();
+}
+
+fn current_rss_kib() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            return rest
+                .split_whitespace()
+                .next()
+                .and_then(|num| num.parse::<u64>().ok());
+        }
+    }
+    None
+}
+
+#[tokio::test]
+#[ignore = "requires tests/integration OpenSSH containers on localhost:2221"]
+async fn sftp_filesystem_and_1gib_streaming_against_real_openssh() {
+    let root = tempfile::tempdir().unwrap();
+    let connection = trusted(root.path()).await;
+    let fs = connection.open_sftp().await.unwrap();
+
+    // 1. Capability probing against real OpenSSH internal-sftp.
+    let caps = fs.capabilities();
+    assert!(
+        caps.posix_rename,
+        "OpenSSH supports posix-rename@openssh.com"
+    );
+    assert!(caps.fsync, "OpenSSH supports fsync@openssh.com");
+    assert!(caps.statvfs, "OpenSSH supports statvfs@openssh.com");
+    assert!((64 * 1024..=256 * 1024).contains(&caps.max_read_size));
+    assert!((64 * 1024..=256 * 1024).contains(&caps.max_write_size));
+    assert!(caps.max_open_handles.is_some());
+
+    let dot = FsPath::Remote(RemotePath::from_posix(".").unwrap());
+    let home = fs.canonicalize(&dot).await.unwrap();
+    assert_eq!(
+        home,
+        FsPath::Remote(RemotePath::from_posix("/home/relay").unwrap())
+    );
+    let free = fs.free_space(&home).await.unwrap();
+    assert!(free.is_some_and(|bytes| bytes > 1024 * 1024));
+
+    // 2. Directory creation, stat/lstat, read/write, metadata, and rename semantics.
+    let work_raw =
+        RemotePath::from_posix(&format!("/tmp/relay-sftp-{}", std::process::id())).unwrap();
+    let work_dir = FsPath::Remote(work_raw.clone());
+    let _ = fs.remove_dir(&work_dir).await;
+    fs.create_dir(&work_dir, 0o700).await.unwrap();
+    let dir_meta = fs.stat(&work_dir).await.unwrap();
+    assert_eq!(dir_meta.kind, FileKind::Directory);
+    assert_eq!(dir_meta.sanitized_permissions(), Some(0o700));
+
+    let file_a = FsPath::Remote(work_raw.join(b"alpha.txt").unwrap());
+    let file_b = FsPath::Remote(work_raw.join(b"beta.txt").unwrap());
+    let mut writer = fs
+        .open_write(&file_a, WriteOptions::create_new(0o640))
+        .await
+        .unwrap();
+    writer.write_all(b"first-version").await.unwrap();
+    assert_eq!(writer.sync().await.unwrap(), SyncOutcome::Synced);
+    writer.close().await.unwrap();
+
+    assert!(matches!(
+        fs.open_write(&file_a, WriteOptions::create_new(0o640))
+            .await,
+        Err(FsError::AlreadyExists)
+    ));
+
+    fs.set_metadata(
+        &file_a,
+        &MetadataPatch {
+            permissions: Some(0o600),
+            mtime: Some(1_700_000_000),
+            atime: Some(1_700_000_000),
+        },
+    )
+    .await
+    .unwrap();
+    let meta_a = fs.lstat(&file_a).await.unwrap();
+    assert_eq!(meta_a.kind, FileKind::File);
+    assert_eq!(meta_a.size, 13);
+    assert_eq!(meta_a.sanitized_permissions(), Some(0o600));
+    assert_eq!(meta_a.mtime, Some(1_700_000_000));
+
+    // NoReplace rename succeeds to a new target, and fails when target exists.
+    fs.rename(&file_a, &file_b, RenameMode::NoReplace)
+        .await
+        .unwrap();
+    let mut writer = fs
+        .open_write(&file_a, WriteOptions::create_new(0o600))
+        .await
+        .unwrap();
+    writer.write_all(b"atomic-replacement").await.unwrap();
+    writer.close().await.unwrap();
+
+    assert!(matches!(
+        fs.rename(&file_a, &file_b, RenameMode::NoReplace).await,
+        Err(FsError::AlreadyExists)
+    ));
+    // AtomicReplace via posix-rename@openssh.com replaces existing target atomically.
+    fs.rename(&file_a, &file_b, RenameMode::AtomicReplace)
+        .await
+        .unwrap();
+    let mut reader = fs.open_read(&file_b).await.unwrap();
+    let data = reader.read_chunk(1024).await.unwrap();
+    reader.close().await.unwrap();
+    assert_eq!(data, b"atomic-replacement");
+    fs.remove_file(&file_b).await.unwrap();
+
+    // 3. Permission denied and directory not found (P0-FS-01).
+    let missing_dir =
+        FsPath::Remote(RemotePath::from_posix("/tmp/relay-missing-dir-99999").unwrap());
+    assert!(matches!(
+        fs.read_dir(&missing_dir).await,
+        Err(FsError::NotFound)
+    ));
+    let root_dir = FsPath::Remote(RemotePath::from_posix("/root").unwrap());
+    assert!(matches!(
+        fs.read_dir(&root_dir).await,
+        Err(FsError::PermissionDenied)
+    ));
+    let ro_dir = FsPath::Remote(work_raw.join(b"readonly").unwrap());
+    fs.create_dir(&ro_dir, 0o500).await.unwrap();
+    let forbidden_file = FsPath::Remote(
+        work_raw
+            .join(b"readonly")
+            .unwrap()
+            .join(b"denied.txt")
+            .unwrap(),
+    );
+    assert!(matches!(
+        fs.open_write(&forbidden_file, WriteOptions::create_new(0o600))
+            .await,
+        Err(FsError::PermissionDenied)
+    ));
+    fs.set_metadata(
+        &ro_dir,
+        &MetadataPatch {
+            permissions: Some(0o700),
+            ..MetadataPatch::default()
+        },
+    )
+    .await
+    .unwrap();
+    fs.remove_dir(&ro_dir).await.unwrap();
+
+    // 4. Non-UTF-8 filename round-trip (P0-FS-02) & U+FFFD mutation guard.
+    let non_utf8_name = b"non-utf8-\xff-\xfe-\x80.bin";
+    let non_utf8_path = FsPath::Remote(work_raw.join(non_utf8_name).unwrap());
+    let mut writer = fs
+        .open_write(&non_utf8_path, WriteOptions::create_new(0o600))
+        .await
+        .unwrap();
+    writer.write_all(b"non-utf8-bytes-ok").await.unwrap();
+    writer.close().await.unwrap();
+
+    let listed = fs.read_dir(&work_dir).await.unwrap();
+    let found = listed
+        .iter()
+        .find(|entry| entry.raw_name == non_utf8_name)
+        .expect("non-UTF-8 entry preserved in read_dir");
+    assert!(!found.is_valid_utf8());
+    assert!(!found.unsafe_name);
+    assert_eq!(found.metadata.size, 17);
+
+    let mut reader = fs.open_read(&found.path).await.unwrap();
+    let read_back = reader.read_chunk(1024).await.unwrap();
+    reader.close().await.unwrap();
+    assert_eq!(read_back, b"non-utf8-bytes-ok");
+
+    let renamed_non_utf8 = FsPath::Remote(work_raw.join(b"renamed-\xff.bin").unwrap());
+    fs.rename(&found.path, &renamed_non_utf8, RenameMode::AtomicReplace)
+        .await
+        .unwrap();
+    fs.remove_file(&renamed_non_utf8).await.unwrap();
+
+    let lossy_path = FsPath::Remote(work_raw.join("bad-\u{fffd}.bin".as_bytes()).unwrap());
+    assert!(matches!(
+        fs.open_write(&lossy_path, WriteOptions::create_new(0o600))
+            .await,
+        Err(FsError::UnsafeName)
+    ));
+
+    // 5. 1 GiB streaming write + read with bounded memory verification.
+    const ONE_GIB: u64 = 1024 * 1024 * 1024;
+    const CHUNK_LEN: usize = 256 * 1024;
+    let gib_path = FsPath::Remote(work_raw.join(b"stream-1gib.bin").unwrap());
+    let mut pattern = vec![0u8; CHUNK_LEN];
+    for (idx, byte) in pattern.iter_mut().enumerate() {
+        *byte = (idx.wrapping_mul(31).wrapping_add(17)) as u8;
+    }
+
+    let rss_before = current_rss_kib().unwrap_or(0);
+    let mut peak_rss_delta_kib = 0u64;
+
+    let write_start = std::time::Instant::now();
+    let mut writer = fs
+        .open_write(&gib_path, WriteOptions::create_new(0o600))
+        .await
+        .unwrap();
+    let mut written = 0u64;
+    while written < ONE_GIB {
+        writer.write_all(&pattern).await.unwrap();
+        written += CHUNK_LEN as u64;
+        if written.is_multiple_of(64 * 1024 * 1024)
+            && let Some(rss) = current_rss_kib()
+        {
+            peak_rss_delta_kib = peak_rss_delta_kib.max(rss.saturating_sub(rss_before));
+        }
+    }
+    writer.sync().await.unwrap();
+    writer.close().await.unwrap();
+    let write_elapsed = write_start.elapsed();
+
+    let gib_meta = fs.lstat(&gib_path).await.unwrap();
+    assert_eq!(gib_meta.size, ONE_GIB);
+
+    let read_start = std::time::Instant::now();
+    let mut reader = fs.open_read(&gib_path).await.unwrap();
+    let mut total_read = 0u64;
+    while {
+        let chunk = reader.read_chunk(CHUNK_LEN).await.unwrap();
+        if chunk.is_empty() {
+            false
+        } else {
+            let offset = (total_read as usize) % CHUNK_LEN;
+            assert_eq!(chunk[0], pattern[offset]);
+            total_read += chunk.len() as u64;
+            if total_read.is_multiple_of(64 * 1024 * 1024)
+                && let Some(rss) = current_rss_kib()
+            {
+                peak_rss_delta_kib = peak_rss_delta_kib.max(rss.saturating_sub(rss_before));
+            }
+            true
+        }
+    } {}
+    reader.close().await.unwrap();
+    let read_elapsed = read_start.elapsed();
+    assert_eq!(total_read, ONE_GIB);
+
+    // Peak RSS growth during a 1 GiB stream must stay bounded (< 64 MiB), not O(file_size).
+    assert!(
+        peak_rss_delta_kib < 64 * 1024,
+        "peak RSS delta {peak_rss_delta_kib} KiB exceeded bounded streaming limit"
+    );
+    eprintln!(
+        "1 GiB SFTP baseline: write={:.2}s ({:.1} MiB/s), read={:.2}s ({:.1} MiB/s), peak_rss_delta={} KiB",
+        write_elapsed.as_secs_f64(),
+        1024.0 / write_elapsed.as_secs_f64(),
+        read_elapsed.as_secs_f64(),
+        1024.0 / read_elapsed.as_secs_f64(),
+        peak_rss_delta_kib
+    );
+
+    fs.remove_file(&gib_path).await.unwrap();
+    fs.remove_dir(&work_dir).await.unwrap();
     connection.disconnect().await.unwrap();
 }
