@@ -145,6 +145,13 @@ russh 自带的 known_hosts 函数仅支持精确主机名与哈希条目，不�
 - **写入位置**：默认写入 Relay 自有信任库（`<config>/relay/known_hosts`，OpenSSH 格式，0600）；可配置为写入 `~/.ssh/known_hosts`。从不修改或删除已有条目。（ADR-015）
 - `@cert-authority`：MVP 不据此建立信任（仍按逐主机确认处理），并记录提示。
 
+**P0-01 实现状态（2026-10-21）**：上述逐主机信任规则已在 `ssh::trust` 实现。
+未知密钥及私钥口令通过 `ssh::prompt` 的有界队列/独立回复通道请求；未回复、拒绝、超时与取消
+不会继续认证。信任写入在文件锁内重新合并来源，只追加；读取错误及畸形记录均拒绝连接。
+原型仅实现 OpenSSH 私钥认证，使用独立示例验证，TUI 与 SessionManager 后续接入。
+配置解析接收显式文件（`ssh -F` 语义），后备模式需明确选择且只支持简单 Host 块；
+复杂语义、未解析路径 token、代理、证书及 KRL 撤销文件等尚不支持时明确拒绝。
+
 ### 5.4 连接与 Channel 模型
 
 默认**每个 HostProfile 一条已认证的 Connection**，承载多个 Channel：
@@ -389,7 +396,8 @@ Windows/WSL2：Windows 路径、WSL 路由和 DNS 需要分别验证；WSL2 内�
 
 ## 13. 构建与分发注意
 
-- russh 默认使用 aws-lc-rs（需要 C 工具链，部分平台需要 CMake/NASM）；P0 在 Linux、WSL2、Windows 交叉编译中评估 aws-lc-rs 与 ring 后端，选择一个并锁定。
+- P0-01 使用 russh 0.64.1，关闭默认特性并选择 ring 0.17.14；Linux 构建已通过，WSL2/Windows 后端验证仍待完成，P0-00 此项保持未完成。
+- 暂禁用 RSA 功能，不通过忽略安全公告来放行构建；当前支持 Ed25519/ECDSA，见 ADR-017。
 - 使用 Rust 2024 edition；MSRV 取所有依赖的最大值（当前 russh 要求 1.89）。
 - CI：fmt、clippy、test、cargo-deny（许可证与漏洞）。
 
@@ -413,6 +421,7 @@ Windows/WSL2：Windows 路径、WSL 路由和 DNS 需要分别验证；WSL2 内�
 | ADR-014 | 覆盖必须原子替换，否则 MVP 拒绝（**已确认** 2026-10-20） | 不允许“先删后写”导致旧数据丢失 |
 | ADR-015 | 新信任默认写入 Relay 信任库 `<config>/relay/known_hosts`，可配置为写入 `~/.ssh/known_hosts`（**已确认** 2026-10-20） | 不修改用户的 OpenSSH 文件；同时读取两者保证一致 |
 | ADR-016 | ProxyJump 保留在 0.2（已确认 2026-10-20） | 若自用核心场景或首批用户的日常连接被阻断，重新评估只提前单跳到 0.1；多跳和 ProxyCommand 仍延后 |
+| ADR-017 | P0-01 暂禁用 RSA，使用 ring + Ed25519/ECDSA（2026-10-21） | cargo-deny 报告 RSA 依赖受未修复的 [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071) 影响；移除 rsa 特性而非忽略公告。历史 RSA known_hosts 仍用于识别算法变化；原生 RSA 支持另行评估 |
 
 ## 15. 关键待决事项
 

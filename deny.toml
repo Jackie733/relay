@@ -4,12 +4,19 @@ all-features = true
 [advisories]
 
 [licenses]
-allow = ["MIT", "Apache-2.0", "Unicode-3.0", "Zlib"]
+# BSD-3-Clause: Dalek/subtle; ISC: ring's bundled cryptography.
+allow = ["MIT", "Apache-2.0", "Unicode-3.0", "Zlib", "BSD-3-Clause", "ISC"]
 confidence-threshold = 0.9
 
 # The repository has no chosen code license and is not published.
 [licenses.private]
 ignore = true
+
+# Unmodified transitive dependency of ssh2-config -> dirs-sys.
+[[licenses.exceptions]]
+name = "option-ext"
+version = "=0.2.0"
+allow = ["MPL-2.0"]
 
 [bans]
 multiple-versions = "warn"

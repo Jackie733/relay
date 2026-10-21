@@ -19,20 +19,23 @@
 
 - [x] Cargo workspace、Rust 2024、MSRV 与 `rust-toolchain.toml`
 - [x] CI 配置：fmt、clippy、test、cargo-deny（另含跨平台构建与 MSRV 检查）
-- [ ] Docker Compose 测试拓扑（OpenSSH A / B / C，A 与 B 网络隔离；配置和检查脚本已提供，待 Docker 环境实测）
-- [ ] 加密后端（aws-lc-rs / ring）在 Linux、WSL2、Windows 构建验证并锁定
+- [x] Docker Compose 测试拓扑（OpenSSH A / B / C；Linux 实测三台密钥认证及六个方向的 DNS / TCP 22 隔离通过，见开发指南验证记录）
+- [ ] 加密后端在 Linux、WSL2、Windows 构建验证并锁定（P0-01 已选择 ring 并在 Linux 验证；WSL2 / Windows 待验）
 
 初始脚手架还提供四个工作空间的可运行外壳与本地只读目录浏览，实际支持范围及检查命令见
 [开发指南](DEVELOPMENT.md)。此实现不计作 SSH、PTY、SFTP 或传输验收完成。
 
 ### P0-01 SSH 连接和 Host Key
 
-- [ ] 通过 russh 连接可控 OpenSSH 容器
-- [ ] SSH 密钥、Agent 至少一种认证方式通过端到端测试；Prompt Broker 原型（主机密钥确认、口令）
-- [ ] 自研 known_hosts：哈希、通配符、`[host]:port`、`@revoked`、全局文件、算法变化
-- [ ] 首次 Host Key 必须显式确认；已知密钥变化必须拒绝
-- [ ] 失败可区分网络、认证、主机验证
-- [ ] `ssh -G` 解析与后备解析器的结果对比
+- [x] 通过 russh 连接可控 OpenSSH 容器（Linux）
+- [x] SSH 密钥至少一种认证方式通过端到端测试；Prompt Broker 原型（主机密钥确认、加密私钥口令；Agent 后续实现）
+- [x] 自研 known_hosts：哈希、通配符、`[host]:port`、`@revoked`、全局文件、算法变化
+- [x] 首次 Host Key 必须显式确认；已知密钥变化必须拒绝
+- [x] 失败可区分网络、认证、主机验证
+- [x] `ssh -G` 解析与后备解析器的结果对比（支持字段的显式配置；后备模式拒绝 Include / Match 等复杂配置）
+
+P0-01 的本次验证范围是 SSH 库及独立连接示例，尚未接入 Hosts UI；跨平台结果以实际执行为准。
+RSA 因未修复的依赖安全公告暂禁用，见 ADR-017；验证命令与限制见开发指南。
 
 ### P0-02 交互式 PTY
 

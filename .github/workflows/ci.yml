@@ -48,5 +48,6 @@ jobs:
       - run: sh tests/integration/prepare.sh
       - run: docker compose -f tests/integration/compose.yml up --build --wait
       - run: sh tests/integration/check.sh
+      - run: cargo test -p ssh --locked --test openssh -- --ignored
       - if: always()
         run: docker compose -f tests/integration/compose.yml down --volumes

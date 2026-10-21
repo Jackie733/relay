@@ -1,5 +1,13 @@
-//! SSH domain boundary. Network, authentication, trust and SFTP are still planned.
-//! No connection may be enabled until host-key verification is implemented.
+//! SSH connections require host-key verification before user authentication.
+
+pub mod config;
+pub mod connection;
+pub mod prompt;
+pub mod trust;
+
+pub use connection::{ConnectError, ConnectOptions, Connection};
+pub use prompt::{Prompt, PromptBroker, PromptError, PromptKind, PromptResponse};
+pub use trust::{HostKey, HostKeyPolicy, TrustDecision, TrustError, TrustStore};
 
 use common::HostId;
 

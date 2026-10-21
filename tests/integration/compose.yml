@@ -2,7 +2,6 @@ name: relay-integration
 
 x-sshd: &sshd
   build: .
-  image: relay-test-sshd:local
   healthcheck:
     test: [CMD-SHELL, "ssh-keyscan -T 2 127.0.0.1 2>/dev/null | grep -q ssh-ed25519"]
     interval: 2s
