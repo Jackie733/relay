@@ -28,6 +28,7 @@ ssh2-config = "=0.8.2"
 thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
 tempfile = "3.27.0"
+vt100 = "0.18.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

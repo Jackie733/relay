@@ -21,6 +21,7 @@ import pyte
 
 def main():
     binary = str(Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/relay").resolve())
+    ssh_fixtures = "--ssh-fixtures" in sys.argv[2:]
     for args, code, expected in [
         (["--help"], 0, b"Usage: relay"),
         (["--version"], 0, b"relay 0.1.0-dev"),
@@ -41,6 +42,7 @@ def main():
         before = termios.tcgetattr(slave)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         process = subprocess.Popen([binary, directory], stdin=slave, stdout=slave, stderr=slave,
+                                   start_new_session=True,
                                    env={**os.environ, "TERM": "xterm-256color"})
         transcript = bytearray()
         screen = pyte.Screen(120, 40)
@@ -126,6 +128,116 @@ def main():
             os.close(slave)
 
     print("PASS: help, errors, 4 views, both file panes, directories, help, resize, quit and terminal restoration")
+    if ssh_fixtures:
+        smoke_ssh_pty(binary)
+
+
+def smoke_ssh_pty(binary):
+    fixture_key = Path(__file__).resolve().parent.parent / "tests/integration/.fixtures/id_ed25519"
+    with tempfile.TemporaryDirectory(prefix="relay-ssh-smoke-") as directory:
+        known_hosts = str(Path(directory) / "known_hosts")
+        master, slave = pty.openpty()
+        before = termios.tcgetattr(slave)
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+        process = subprocess.Popen(
+            [
+                binary,
+                "--ssh",
+                "127.0.0.1",
+                "2221",
+                "relay",
+                str(fixture_key),
+                known_hosts,
+                directory,
+            ],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            start_new_session=True,
+            env={**os.environ, "TERM": "xterm-256color"},
+        )
+        transcript = bytearray()
+        screen = pyte.Screen(100, 30)
+        stream = pyte.Stream(screen)
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
+        def screen_text():
+            return "\n".join(
+                "".join(screen.buffer[y][x].data for x in range(screen.columns))
+                for y in range(screen.lines)
+            )
+
+        def read_for(seconds=0.2):
+            output = bytearray()
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], max(0, deadline - time.monotonic()))[0]:
+                    try:
+                        data = os.read(master, 65536)
+                    except OSError as error:
+                        if error.errno == errno.EIO:
+                            break
+                        raise
+                    if not data:
+                        break
+                    output.extend(data)
+                    stream.feed(decoder.decode(data))
+            transcript.extend(output)
+            return bytes(output)
+
+        def expect(text, seconds=8):
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                read_for(0.1)
+                if text in screen_text() or text.encode("utf-8") in transcript:
+                    return
+            raise AssertionError(f"Missing {text!r}; screen:\n" + screen_text())
+
+        def expect_screen(text, seconds=8):
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                read_for(0.1)
+                if text in screen_text():
+                    return
+            raise AssertionError(f"Missing {text!r} on screen:\n" + screen_text())
+
+        try:
+            expect("Type yes:")
+            os.write(master, b"yes\n")
+            expect_screen("[TERMINAL]")
+            os.write(master, b"echo smoke-pty-''ok\r")
+            expect_screen("smoke-pty-ok")
+            # Resize the outer Unix PTY and verify the remote SSH PTY receives it.
+            screen.resize(34, 112)
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 34, 112, 0, 0))
+            process.send_signal(signal.SIGWINCH)
+            time.sleep(0.15)
+            os.write(master, b"stty size\r")
+            expect_screen("27 110")
+            # F12 returns to Control; 2 switches to Files; 3 + Enter re-focuses PTY.
+            os.write(master, b"\x1b[24~")
+            expect_screen("[CONTROL]")
+            os.write(master, b"2")
+            expect_screen("Left Local")
+            os.write(master, b"3")
+            os.write(master, b"\r")
+            expect_screen("[TERMINAL]")
+            # Fallback escape key Ctrl+] (0x1d) also returns to Control.
+            os.write(master, b"\x1d")
+            expect_screen("[CONTROL]")
+            os.write(master, b"q")
+            assert process.wait(timeout=5) == 0
+            read_for(0.1)
+            assert termios.tcgetattr(slave) == before, "terminal settings were not restored"
+            assert b"\x1b[?2004l" in transcript, "bracketed paste was not disabled"
+            assert b"\x1b[?1049l" in transcript, "alternate screen was not restored"
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            os.close(master)
+            os.close(slave)
+    print("PASS: real Unix PTY -> Relay TUI -> SSH PTY end-to-end session, F12/Ctrl+] escape and cleanup")
 
 
 if __name__ == "__main__":

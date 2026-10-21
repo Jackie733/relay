@@ -6,7 +6,8 @@ use russh::{ChannelMsg, keys::PublicKey};
 use secrecy::SecretString;
 use ssh::{
     ConnectError, ConnectOptions, Connection, HostKey, HostKeyPolicy, HostProfile, PromptBroker,
-    PromptError, PromptKind, PromptResponse, TrustDecision, TrustError, TrustStore,
+    PromptError, PromptKind, PromptResponse, PtyCommand, PtyEvent, PtyReader, PtySize,
+    TrustDecision, TrustError, TrustStore,
 };
 
 fn options(root: &Path) -> ConnectOptions {
@@ -244,4 +245,93 @@ async fn safe_connections_against_real_openssh() {
     // The saved public key is byte-for-byte usable by OpenSSH tooling.
     let parsed = PublicKey::from_openssh(&key.openssh()).unwrap();
     assert_eq!(HostKey::from_public_key(&parsed).unwrap(), key);
+}
+
+async fn trusted(root: &Path) -> Connection {
+    let (broker, mut receiver) = PromptBroker::channel(1);
+    let connect = tokio::spawn(Connection::connect(options(root), broker));
+    // Only the disposable fixture key is trusted, inside a temporary store.
+    if let Some(prompt) = receiver.recv().await {
+        assert!(matches!(prompt.kind, PromptKind::HostKey { .. }));
+        prompt.response.send(PromptResponse::Trust).unwrap();
+    }
+    connect.await.unwrap().unwrap()
+}
+
+async fn read_until(reader: &mut PtyReader, output: &mut Vec<u8>, needle: &str) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !String::from_utf8_lossy(output).contains(needle) {
+            match reader.next().await {
+                Some(PtyEvent::Output(data)) => output.extend_from_slice(&data),
+                event => panic!("unexpected {event:?} while waiting for {needle:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {needle:?}"));
+}
+
+#[tokio::test]
+#[ignore = "requires tests/integration OpenSSH containers on localhost:2221"]
+async fn interactive_pty_against_real_openssh() {
+    let root = tempfile::tempdir().unwrap();
+    let connection = trusted(root.path()).await;
+    let (mut reader, writer) = connection
+        .open_pty(PtySize::new(80, 24), PtyCommand::Shell)
+        .await
+        .unwrap();
+    let mut output = Vec::new();
+    // Markers are assembled remotely so the echoed command cannot match.
+    writer
+        .write(b"stty size; echo \"$TERM\"; locale charmap; echo relay-''one\r")
+        .await
+        .unwrap();
+    read_until(&mut reader, &mut output, "relay-one").await;
+    let text = String::from_utf8_lossy(&output);
+    assert!(text.contains("24 80"), "{text}");
+    assert!(text.contains("xterm-256color"), "{text}");
+    assert!(text.contains("UTF-8"), "{text}");
+
+    writer.resize(PtySize::new(132, 43)).await.unwrap();
+    output.clear();
+    writer
+        .write(b"stty size; echo relay-''two\r")
+        .await
+        .unwrap();
+    read_until(&mut reader, &mut output, "relay-two").await;
+    assert!(String::from_utf8_lossy(&output).contains("43 132"));
+
+    // Ctrl+C interrupts the foreground command without closing the shell.
+    output.clear();
+    writer.write(b"sleep 30\r").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    writer.write(b"\x03echo relay-''three\r").await.unwrap();
+    read_until(&mut reader, &mut output, "relay-three").await;
+
+    writer.write(b"exit 7\r").await.unwrap();
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = reader.next().await {
+            if !matches!(event, PtyEvent::Output(_)) {
+                events.push(event);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(events.first(), Some(&PtyEvent::Exited(7)));
+    assert_eq!(events.last(), Some(&PtyEvent::Closed));
+
+    let (mut reader, _writer) = connection
+        .open_pty(PtySize::new(80, 24), PtyCommand::Exec("exit 3".into()))
+        .await
+        .unwrap();
+    let mut status = None;
+    while let Some(event) = reader.next().await {
+        if let PtyEvent::Exited(code) = event {
+            status = Some(code);
+        }
+    }
+    assert_eq!(status, Some(3));
+    connection.disconnect().await.unwrap();
 }

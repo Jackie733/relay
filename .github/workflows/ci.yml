@@ -48,6 +48,11 @@ jobs:
       - run: sh tests/integration/prepare.sh
       - run: docker compose -f tests/integration/compose.yml up --build --wait
       - run: sh tests/integration/check.sh
-      - run: cargo test -p ssh --locked --test openssh -- --ignored
+      - run: cargo test --workspace --locked -- --ignored
+      - run: |
+          cargo build --locked
+          python3 -m venv "$RUNNER_TEMP/relay-ssh-ui"
+          "$RUNNER_TEMP/relay-ssh-ui/bin/pip" install -r scripts/requirements-test.txt
+          "$RUNNER_TEMP/relay-ssh-ui/bin/python" scripts/smoke_tui.py target/debug/relay --ssh-fixtures
       - if: always()
         run: docker compose -f tests/integration/compose.yml down --volumes

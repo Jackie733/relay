@@ -2,7 +2,7 @@
 
 三个独立 Docker bridge 网络分别放置 OpenSSH A/B/C，端口只绑定本机
 `127.0.0.1:2221/2222/2223`。A/B 不共享容器网络；Relay 从本机分别访问。
-此处提供 P0-01 SSH 验证环境；PTY、SFTP 和传输测试后续添加。
+此处提供 P0-01/P0-02 SSH 与交互式 PTY 验证环境（含 `vim`、`htop`、`tmux`、`less` 与 `C.UTF-8` locale）；SFTP 和传输测试后续添加。
 
 要求 Docker Compose v2（支持 `up --wait`）、本机 OpenSSH 客户端及 POSIX shell。
 
@@ -12,7 +12,7 @@
 sh tests/integration/prepare.sh
 docker compose -f tests/integration/compose.yml up --build --wait
 sh tests/integration/check.sh
-cargo test -p ssh --locked --test openssh -- --ignored
+cargo test --workspace --locked -- --ignored
 docker compose -f tests/integration/compose.yml down --volumes
 ```
 

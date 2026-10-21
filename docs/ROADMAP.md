@@ -39,14 +39,16 @@ RSA 因未修复的依赖安全公告暂禁用，见 ADR-017；验证命令与�
 
 ### P0-02 交互式 PTY
 
-- [ ] 打开 PTY 并持续收发数据
-- [ ] 在 Ratatui 区域渲染远端 `vim` / `htop`，支持颜色和光标
-- [ ] 窗口 resize 正确传给远端 PTY
-- [ ] Input Encoder：DECCKM、修饰键、Alt 前缀、括号粘贴（含注入剔除）
-- [ ] DA / DSR 查询应答；vim、htop、tmux、less 不因缺少应答而卡顿
-- [ ] 终端内 `Esc`、`Ctrl+C`、方向键和粘贴工作；CJK 宽字符与真彩色渲染正确
-- [ ] 证明可以安全地从 Terminal Input 返回 Relay Control；记录逃逸键在各终端模拟器中的兼容矩阵，确定默认键与后备键
-- [ ] 结论：vt100 保真度是否足够（否则切换 alacritty_terminal）
+- [x] 打开 PTY 并持续收发数据
+- [x] 在 Ratatui 区域渲染远端 `vim` / `htop`，支持颜色和光标
+- [x] 窗口 resize 正确传给远端 PTY
+- [x] Input Encoder：DECCKM、修饰键、Alt 前缀、括号粘贴（含注入剔除）
+- [x] DA / DSR 查询应答；vim、htop、tmux、less 不因缺少应答而卡顿
+- [x] 终端内 `Esc`、`Ctrl+C`、方向键和粘贴工作；CJK 宽字符与真彩色渲染正确
+- [x] 证明可以安全地从 Terminal Input 返回 Relay Control；记录逃逸键在各终端模拟器中的兼容矩阵，确定默认键与后备键
+- [x] 结论：vt100 保真度是否足够（否则切换 alacritty_terminal）
+
+P0-02 结论（2026-10-21）：`vt100 0.18.1` 配合 `Responder`（仅根据本地仿真状态应答 DA1/DA2/DSR/CPR/XTWINOPS 18，拦截 OSC 52 并清洗 OSC 0/2 标题）与直接向 Ratatui `Buffer` 渲染单元格（处理 CJK 宽字符延续格与右边界裁剪，不引入依赖旧版 `vt100 0.16` 的 `tui-term`），在真实 OpenSSH 容器中通过 `vim`、`htop`、`tmux`、`less`、CJK 宽字符及 24-bit 真彩色验收，无需切换 `alacritty_terminal`。默认同时启用主键 `F12` 与后备键 `Ctrl+]`（兼容传统终端将 `0x1d` 报告为 `Ctrl+5` 与 kitty 协议报告 `Ctrl+]`），支持连按两次透传给远端及 `--escape-key` 自定义，详见 [交互 §3.2](UX.md#32-逃逸键) 与 ADR-008/018。
 
 ### P0-03 SFTP 文件接口
 

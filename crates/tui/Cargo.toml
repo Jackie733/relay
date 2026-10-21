@@ -17,6 +17,7 @@ crossterm.workspace = true
 futures-util.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
+vt100.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

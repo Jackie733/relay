@@ -1,14 +1,12 @@
 //! Minimal P0 probe. Opens an authenticated connection, then disconnects.
 use std::{
-    io::{self, IsTerminal, Write},
+    io::{self, IsTerminal},
     path::PathBuf,
 };
 
 use common::{HostId, display_text};
-use secrecy::SecretString;
 use ssh::{
-    ConnectOptions, Connection, HostProfile, Prompt, PromptBroker, PromptKind, PromptResponse,
-    TrustDecision, TrustStore,
+    ConnectOptions, HostProfile, TrustStore,
     config::{ResolveMode, resolve},
 };
 
@@ -69,19 +67,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         return Err("Usage: connect HOST PORT USER IDENTITY RELAY_KNOWN_HOSTS\n       connect --config ALIAS CONFIG_FILE [--fallback]".into());
     };
-    let (broker, mut requests) = PromptBroker::channel(1);
-    let connect = Connection::connect(options, broker);
-    tokio::pin!(connect);
-    let connection = loop {
-        tokio::select! {
-            result = &mut connect => break result?,
-            Some(prompt) = requests.recv() => {
-                // A plain thread lets process shutdown finish if a prompt's
-                // deadline expires while the terminal read is still blocked.
-                std::thread::spawn(move || answer(prompt));
-            }
-        }
-    };
+    let connection = ssh::tty::connect(options).await?;
     eprintln!(
         "Authenticated to {}:{} as {}.",
         display_text(&connection.host().hostname),
@@ -90,57 +76,4 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     connection.disconnect().await?;
     Ok(())
-}
-
-fn answer(prompt: Prompt) {
-    eprintln!(
-        "SSH {}:{} ({})",
-        display_text(&prompt.host.hostname),
-        prompt.host.port,
-        display_text(&prompt.host.username)
-    );
-    let response = match prompt.kind {
-        PromptKind::HostKey {
-            key,
-            report,
-            peer_address,
-        } => {
-            eprintln!("Remote address: {peer_address}");
-            if report.decision == TrustDecision::AlgorithmChanged {
-                eprintln!(
-                    "WARNING: different host-key algorithm; known: {}",
-                    display_text(&report.known_algorithms.join(", "))
-                );
-            }
-            if report.ignored_certificate_authority {
-                eprintln!(
-                    "Certificate-authority entries are not supported; verify this host key independently."
-                );
-            }
-            eprintln!(
-                "{} {}",
-                display_text(&key.algorithm),
-                display_text(&key.fingerprint)
-            );
-            eprint!("Verify the fingerprint independently. Trust and save this key? Type yes: ");
-            let _ = io::stderr().flush();
-            let mut input = String::new();
-            if io::stdin().read_line(&mut input).is_ok() && input.trim() == "yes" {
-                PromptResponse::Trust
-            } else {
-                PromptResponse::Reject
-            }
-        }
-        PromptKind::KeyPassphrase { identity_file } => {
-            eprintln!(
-                "Passphrase for {}",
-                display_text(&identity_file.display().to_string())
-            );
-            match rpassword::prompt_password("Passphrase (hidden): ") {
-                Ok(value) => PromptResponse::Passphrase(SecretString::from(value)),
-                Err(_) => PromptResponse::Reject,
-            }
-        }
-    };
-    let _ = prompt.response.send(response);
 }

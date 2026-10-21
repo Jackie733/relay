@@ -15,13 +15,13 @@ secrecy.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "process"] }
 ssh2-config.workspace = true
+rpassword.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-rpassword.workspace = true
 
 [lints]
 workspace = true

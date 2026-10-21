@@ -78,6 +78,8 @@ pub enum ConnectError {
     Worker,
     #[error("SSH user, identities and nonzero timeouts must be configured")]
     InvalidOptions,
+    #[error("SSH server rejected the {0} channel request")]
+    ChannelRequest(&'static str),
 }
 
 impl From<russh::Error> for ConnectError {
@@ -202,6 +204,10 @@ impl Connection {
 
     pub fn is_closed(&self) -> bool {
         self.session.is_closed()
+    }
+
+    pub(crate) fn network_timeout(&self) -> Duration {
+        self.network_timeout
     }
 
     pub async fn open_session(&self) -> Result<Channel<client::Msg>, ConnectError> {

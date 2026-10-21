@@ -103,9 +103,20 @@ PTY 聚焦时，所有可表达的键盘事件都发送给远程应用。禁止�
 
 ### 3.2 逃逸键
 
-- 默认候选 `F12`，**可在配置中更换**；P0 需验证 Linux 常见终端、Windows Terminal、WSL2、macOS Terminal / iTerm2 的兼容性。已知风险：Yakuake/Guake 默认用 F12 呼出窗口，macOS 上 F12 可能是媒体键。
-- 连续按两次逃逸键：向远端发送一次该键本身（远端应用确实需要它时）。
-- P0 结束时确定一个后备组合键写入默认配置，并在首次进入 Terminal Input 时提示当前逃逸键。
+- 默认同时启用主键 `F12` 与后备键 `Ctrl+]`（可通过 `--escape-key` 或后续 `config.toml` 更换）。
+- 连续按两次逃逸键：向远端发送一次该键本身（远端应用确实需要它时），并保持在 `Terminal Input` 模式。
+- 首次进入 `Terminal Input` 时在状态栏提示当前生效的逃逸键；远端会话退出或断开时自动退回 `Control` 模式，防止焦点被困在已结束的会话中。
+
+各终端模拟器逃逸键兼容矩阵（P0-02 梳理与验证）：
+
+| 外层终端 / 环境 | `F12`（默认主键） | `Ctrl+]`（默认后备键，ASCII `0x1d`） | 备注 |
+| --- | --- | --- | --- |
+| xterm / VTE（GNOME Terminal、xfce4-terminal） | 发送 `\x1b[24~`，可用 | 发送 `0x1d`（crossterm 传统模式解析为 `Ctrl+5`），可用 | `KeyBinding::matches` 按控制字节等价匹配 `Ctrl+]` 与 `Ctrl+5` |
+| Alacritty / Kitty / WezTerm / foot | 发送 `\x1b[24~`，可用 | 传统模式为 `0x1d`，kitty 协议下为 `Ctrl+]`，均可用 | 同时覆盖两种解码路径 |
+| KDE + Yakuake / GNOME + Guake | **常被全局下拉热键拦截** | 可用 | 下拉式终端用户可直接用 `Ctrl+]` 返回 Control |
+| Windows Terminal（原生 / WSL2） | 发送 `\x1b[24~`，可用 | 发送 `0x1d`，可用 | 不与默认复制/粘贴冲突 |
+| macOS Terminal.app / iTerm2 | 需配合 `Fn` 或开启标准功能键，否则触发音量键 | 发送 `0x1d`，可用 | 笔记本键盘免 `Fn` 直接使用 `Ctrl+]` |
+| 外层 tmux / GNU screen | 透传 `\x1b[24~`，可用 | 透传 `0x1d`（不与 `Ctrl+B` / `Ctrl+A` 冲突），可用 | 若远端在 vim tag 跳转需 `Ctrl+]`，连按两次即可发送给远端 |
 
 ### 3.3 快捷键（MVP 候选）
 

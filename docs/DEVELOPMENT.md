@@ -2,7 +2,7 @@
 
 ## 当前交付范围
 
-当前已完成工程基线及 P0-01 的 Linux SSH 连接原型，完整 P0 Gate 尚未通过。
+当前已完成工程基线、P0-01 SSH 连接原型与 P0-02 交互式 PTY 终端，完整 P0 Gate 尚未通过。
 
 - Rust 2024 Cargo workspace；开发工具链固定为 1.97.1，MSRV 为 1.89。
 - `relay` 启动后默认进入 Hosts；`1/2/3/4` 切换四个工作空间。
@@ -13,12 +13,13 @@
 - `?` 帮助不会遮挡模式状态栏；正常退出、返回错误及 panic 有终端恢复路径。
 - 本地名称保留 `OsString`，远端路径保留原始字节；显示时转义控制字符。
 - 已提供三台 OpenSSH 测试主机的 Docker 配置和临时测试密钥生成脚本。
-- `ssh` crate 支持主机信任校验、显式首次确认、加密/未加密 OpenSSH 私钥认证；提供独立连接示例。
-- `ssh -G` 与不执行命令的后备配置解析器已对照测试；连接能力尚未接入 Hosts UI。
+- `ssh` crate 支持主机信任校验、显式首次确认、加密/未加密 OpenSSH 私钥认证，以及长期交互式 PTY Channel（`xterm-256color`、窗口大小同步、退出状态回报）。
+- `ssh -G` 与不执行命令的后备配置解析器已对照测试；可通过 `relay --ssh ...` 或 `relay --ssh-config ...` 打开交互式 SSH 终端（连接前在控制终端完成主机密钥或私钥口令确认）。
+- `tui` 集成 `vt100 0.18.1`、设备查询应答器（DA1/DA2/DSR/CPR/XTWINOPS 18）、安全策略（OSC 52 拦截、OSC 0/2 标题清洗）、`Input Encoder`（DECCKM、xterm 修饰键、Alt 前缀、防注入括号粘贴）与 `Terminal Input` / `Control` 模式切换（默认同时启用 `F12` 与 `Ctrl+]`，连按两次透传，支持 `--escape-key`）。
 
-尚未实现：TUI 的主机连接工作流、SSH Agent/密码/keyboard-interactive、PTY、SFTP、文件写入/复制/删除、
-传输调度、日志持久化、用户配置及自定义快捷键。界面不会展示虚构的已连接主机或运行任务。
-已锁定 russh 0.64.1 + ring 0.17.14，禁用 russh 默认特性与 RSA；终端仿真及按键逃逸方案待 P0-02 验证。
+尚未实现：Hosts UI 的主机列表与模态框工作流、SSH Agent/密码/keyboard-interactive、SFTP、文件写入/复制/删除、
+传输调度、日志持久化、用户配置文件落盘。界面不会展示虚构的已连接主机或运行任务。
+已锁定 russh 0.64.1 + ring 0.17.14，禁用 russh 默认特性与 RSA；终端仿真已定案使用 `vt100 0.18.1`（ADR-018）。
 
 初始 `FileSystem` 仅有只读 `read_dir`；它暂时一次返回最多 10,000 项，超过时明确报错。
 目前串行处理目录请求，不支持读取中的取消。分批目录流、取消和写入能力随 P0-FS 引入，
@@ -146,6 +147,29 @@ cargo run --locked -p ssh --example connect -- --config ALIAS /path/to/ssh_confi
   拒绝 Include / Match、重复信任指令、未解析的路径 token，以及代理/证书等不支持功能。
   `ssh -G` 的空格路径输出有歧义时拒绝读取该信任来源。后备模式不是完整 OpenSSH 兼容层。
 - 目前没有完整的会话管理器、TUI 模态框和终端屏幕；下一步为 P0-02 PTY。
+
+### P0-02 交互式 PTY 终端（2026-10-21）
+
+在上述 Linux 环境通过 36 项常规单元测试、3 项真实 OpenSSH 集成测试（`ssh` + `tui`），以及真实 Unix PTY 端到端交互冒烟检查，另通过格式检查、Clippy、发布构建、Rust 1.89 MSRV 检查与 cargo-deny。
+
+实测验证：
+
+- `ssh::Connection::open_pty` 请求 `xterm-256color`（设置 `VERASE=0x7f` 与 `IUTF8=1`）并拆分并发读写半部；支持持续收发、50 ms 防抖 `window-change` 及远端退出状态回报。
+- `tui::terminal` 实现 `Input Encoder`（DECCKM 应用光标、xterm 修饰参数、Alt 前缀、Ctrl 控制字符、剔除嵌入 `ESC[201~`/`ESC[200~` 的括号粘贴）与 `Emulator`（`vt100 0.18.1` + 10,000 行回滚缓冲 + 仅由本地状态生成的 DA1/DA2/DSR/CPR/XTWINOPS 18 应答，单批应答限长 4 KiB，拒绝 OSC 52 剪贴板读写并清洗 OSC 0/2 标题）。
+- 针对真实 OpenSSH 容器端到端运行并渲染 `vim`（含备用屏幕、DA/CPR 应答、DECCKM 方向键、`Esc`、CJK 编辑保存）、`htop`（彩色进程界面与退出）、`less`（DECCKM 翻页与退出）、`tmux`（状态栏、24-bit 真彩色与 CJK 宽字符）、readline 括号粘贴防提前执行注入，以及窗口 resize（`stty size` 校验）。
+- 验证 `F12` 与后备键 `Ctrl+]`（含传统 `0x1d`/`Ctrl+5` 解码）从 `Terminal Input` 安全返回 `Relay Control`、连按两次向远端透传，以及会话退出自动回到 `Control`。同时修复了 `scripts/smoke_tui.py` 未开启独立会话（`start_new_session=True`）导致子进程继承父 shell `/dev/tty` 窗口大小的问题。
+
+启动测试容器后，可运行：
+
+```sh
+cargo test --workspace --locked -- --ignored
+/tmp/relay-ui-tests/bin/python scripts/smoke_tui.py target/release/relay --ssh-fixtures
+cargo run --locked -- --ssh \
+  127.0.0.1 2221 relay tests/integration/.fixtures/id_ed25519 /tmp/relay-p0-known-hosts
+cargo run --locked -- --ssh-config ALIAS /path/to/ssh_config [--fallback] [--escape-key ctrl+g]
+```
+
+原型边界：目前通过命令行参数在启动 TUI 前建立单条 P0 SSH PTY 会话，尚未接入 Hosts 工作空间与 TUI 模态框；下一步为 P0-03 SFTP 文件接口。
 
 本次变更的 Windows/macOS/WSL2 和远端 CI 尚待实际执行。
 

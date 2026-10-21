@@ -65,7 +65,7 @@ tui ──► transfer ──► common
 | SSH | russh 0.64（Apache-2.0，MSRV 1.89） | PTY、多 Channel、Agent（Unix socket / Pageant / Windows 命名管道）；加密后端 aws-lc-rs 与 ring 二选一（见 §13） |
 | SFTP | **优先自研精简 SFTP v3**：P0 验证后定案，改造 russh-sftp 3.0.1 为备选 | russh-sftp 以 `String` 表示路径并对非 UTF-8 文件名做有损解码，缺少 posix-rename，见 §6.3 |
 | 主机信任 | **自研** known_hosts 模块 | russh 自带实现不支持通配符、`@revoked`、全局文件等，见 §5.3 |
-| 终端仿真 | vt100 0.18 + tui-term 0.3（候选）；alacritty_terminal 0.26 作为备选 | vt100 暴露 DECCKM / 括号粘贴 / 鼠标模式，便于输入编码；不应答 DA/DSR，需要补充 |
+| 终端仿真 | vt100 0.18 + 自有 Ratatui 单元格渲染（P0-02 已定案） | vt100 暴露 DECCKM / 括号粘贴 / 备用屏幕模式；补充 DA/DSR 应答与宽字符边界裁剪，不引入绑定旧版 vt100 0.16 的 tui-term |
 | SSH 配置 | 优先 `ssh -G`；后备 ssh2-config 0.8 | 见 §5.1 |
 | 配置序列化 | Serde + TOML | 偏好、快捷键、保存的主机 |
 | 目录约定 | `directories` | 各平台配置/状态目录 |
@@ -343,7 +343,7 @@ PTY 输出 ──► 终端仿真（vt100）──► 屏幕状态 ──► tui
 - **查询应答**：vt100 不应答设备查询。通过 `unhandled_csi` 回调实现 DA1（`CSI c`）、DSR（`CSI 5n` / `CSI 6n` 光标位置）等最小集合，应答只写回该 PTY。
 - **安全策略**：OSC 0/2 标题清洗控制字符后显示在 Tab 上；OSC 52 写剪贴板默认拒绝（可配置为“允许并提示”），读剪贴板始终拒绝；OSC 8 只显示文本；响铃显示为 Tab 标记。
 - **资源上限**：滚动缓冲默认上限（候选 10 000 行，可配置）；输出洪泛时持续读取并解析，渲染受帧率上限约束。
-- **备选**：若 vt100 在 P0 测试（vim、htop、tmux、less、CJK 宽字符、emoji、真彩色）中保真度不足，切换 alacritty_terminal，代价是更重的依赖和自写渲染适配。
+- **备选与 P0-02 结论（2026-10-21）**：`vt100 0.18.1` 配合 `Responder`（应答 DA1 `CSI c`、DA2 `CSI > c`、DSR `CSI 5n`、CPR `CSI 6n` / `CSI ? 6n`、XTWINOPS `CSI 18t`，单批应答设 4 KiB 上限）与自有 Ratatui `Buffer` 渲染器，已在真实 OpenSSH 容器中通过 `vim`、`htop`、`tmux`、`less`、CJK 宽字符与 24-bit 真彩色交互测试，保真度满足 0.1 需求，不切换 `alacritty_terminal`（ADR-018）。
 
 ## 9. TUI 结构
 
@@ -412,7 +412,7 @@ Windows/WSL2：Windows 路径、WSL 路由和 DNS 需要分别验证；WSL2 内�
 | ADR-005 | Tailscale 作为网络接入 | 无需自行实现 WireGuard 或额外服务 |
 | ADR-006 | 主机密钥严格验证 | 避免中间人攻击及不可信连接 |
 | ADR-007 | CLI 延至 0.2 | 先验证真实 PTY + 传输并行体验 |
-| ADR-008 | 逃逸键可配置，默认 F12（候选），P0 验证兼容性并确定后备键 | 避免与远端常用按键冲突；F12 会被 Yakuake/Guake、macOS 媒体键等占用 |
+| ADR-008 | 逃逸键可配置，默认同时启用 `F12` 与后备键 `Ctrl+]`（**已确认** 2026-10-21） | 避免与远端常用按键冲突；`F12` 被 Yakuake/Guake、macOS 媒体键拦截时可用 `Ctrl+]`（兼容传统 `0x1d`/`Ctrl+5` 与 kitty 协议），连按两次向远端透传 |
 | ADR-009 | 自研 known_hosts 解析与判定 | russh 实现不支持通配符、`@revoked`、全局文件，且误判算法变化 |
 | ADR-010 | 内部路径为字节；优先自研精简 SFTP v3，P0 Gate 后定案（方向已确认 2026-10-20） | 防止非 UTF-8 文件名被无声改写；改造 russh-sftp 为备选 |
 | ADR-011 | 默认每主机单连接多 Channel，独立传输连接为可选项 | 避免重复认证；以 P0 延迟测量为准 |
@@ -422,13 +422,12 @@ Windows/WSL2：Windows 路径、WSL 路由和 DNS 需要分别验证；WSL2 内�
 | ADR-015 | 新信任默认写入 Relay 信任库 `<config>/relay/known_hosts`，可配置为写入 `~/.ssh/known_hosts`（**已确认** 2026-10-20） | 不修改用户的 OpenSSH 文件；同时读取两者保证一致 |
 | ADR-016 | ProxyJump 保留在 0.2（已确认 2026-10-20） | 若自用核心场景或首批用户的日常连接被阻断，重新评估只提前单跳到 0.1；多跳和 ProxyCommand 仍延后 |
 | ADR-017 | P0-01 暂禁用 RSA，使用 ring + Ed25519/ECDSA（2026-10-21） | cargo-deny 报告 RSA 依赖受未修复的 [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071) 影响；移除 rsa 特性而非忽略公告。历史 RSA known_hosts 仍用于识别算法变化；原生 RSA 支持另行评估 |
+| ADR-018 | 终端仿真采用 `vt100 0.18.1` + 自有 Ratatui 渲染与 `Responder`（**已确认** 2026-10-21） | P0-02 实测 `vim`、`htop`、`tmux`、`less`、CJK 宽字符和真彩色通过；`tui-term 0.3` 锁定旧版 `vt100 0.16`，自有渲染仅数十行且可直接控制宽字符右边界裁剪与光标呈现 |
 
 ## 15. 关键待决事项
 
 - 优先自研的精简 SFTP v3 客户端能否通过安全、异常处理和资源上限验证？未通过则重新评估改造 russh-sftp。（P0-03）
 - 单连接多路复用下的终端延迟是否可接受？（P0-04）
-- vt100 的保真度是否足够，还是改用 alacritty_terminal？（P0-02）
-- 逃逸键默认值与后备键（P0-02 兼容性矩阵）。
 - aws-lc-rs 与 ring 的选择（P0 构建验证）。
 - 是否需要在 0.2 采用 SQLite 持久化任务元数据？
 

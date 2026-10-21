@@ -3,10 +3,13 @@
 pub mod config;
 pub mod connection;
 pub mod prompt;
+pub mod pty;
 pub mod trust;
+pub mod tty;
 
 pub use connection::{ConnectError, ConnectOptions, Connection};
 pub use prompt::{Prompt, PromptBroker, PromptError, PromptKind, PromptResponse};
+pub use pty::{PtyCommand, PtyEvent, PtyReader, PtySize, PtyWriter};
 pub use trust::{HostKey, HostKeyPolicy, TrustDecision, TrustError, TrustStore};
 
 use common::HostId;
