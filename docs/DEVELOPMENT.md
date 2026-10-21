@@ -2,7 +2,7 @@
 
 ## 当前交付范围
 
-当前已完成工程基线、P0-01 SSH 连接原型、P0-02 交互式 PTY 终端与 P0-03 SFTP 文件接口，完整 P0 Gate 尚未通过。
+当前已完成工程基线、P0-01 SSH 连接原型、P0-02 交互式 PTY 终端、P0-03 SFTP 文件接口与 P0-04 跨主机传输原型（Linux）。完整 P0 Gate 仍待 P0-00 的 Windows/WSL2 加密后端验证。
 
 - Rust 2024 Cargo workspace；开发工具链固定为 1.97.1，MSRV 为 1.89。
 - `relay` 启动后默认进入 Hosts；`1/2/3/4` 切换四个工作空间。
@@ -16,22 +16,23 @@
 - `ssh` crate 支持主机信任校验、显式首次确认、加密/未加密 OpenSSH 私钥认证、长期交互式 PTY Channel（`xterm-256color`、窗口大小同步、退出状态回报），以及自研精简 SFTP v3 客户端（`SftpClient` / `RemoteFs`，支持列目录、`stat`/`lstat`、`canonicalize`、创建/删除目录与文件、有界流水线流式读写、`NoReplace` 与 `posix-rename@openssh.com` `AtomicReplace` 重命名、`fsync@openssh.com`、`statvfs@openssh.com`、`limits@openssh.com` 能力探测）。
 - `ssh -G` 与不执行命令的后备配置解析器已对照测试；可通过 `relay --ssh ...` 或 `relay --ssh-config ...` 打开交互式 SSH 终端与远端 SFTP 浏览（连接前在控制终端完成主机密钥或私钥口令确认）。
 - `tui` 集成 `vt100 0.18.1`、设备查询应答器（DA1/DA2/DSR/CPR/XTWINOPS 18）、安全策略（OSC 52 拦截、OSC 0/2 标题清洗）、`Input Encoder`（DECCKM、xterm 修饰键、Alt 前缀、防注入括号粘贴）与 `Terminal Input` / `Control` 模式切换（默认同时启用 `F12` 与 `Ctrl+]`，连按两次透传，支持 `--escape-key`）。
+- `transfer` 提供 `plan_transfer` / `execute_plan` / `run_transfer` API，经 `FsResolver` 使用本机或 SFTP 文件接口，支持有界中继、冲突决策、协作式取消、目标锁、临时文件提交与 Basic 完整性检查。真实双主机复制及传输期间的终端响应已验证，尚未接入队列 UI。
 
-尚未实现：Hosts UI 的主机列表与模态框工作流、SSH Agent/密码/keyboard-interactive、跨主机传输调度（P0-04）、
+尚未实现：Hosts UI 的主机列表与模态框工作流、SSH Agent/密码/keyboard-interactive、全局/每主机传输队列调度与 UI、
 日志持久化、用户配置文件落盘。界面不会展示虚构的已连接主机或运行任务。
 已锁定 russh 0.64.1 + ring 0.17.14，禁用 russh 默认特性与 RSA；终端仿真已定案使用 `vt100 0.18.1`（ADR-018）；SFTP 客户端已定案采用自研精简 SFTP v3（ADR-010）。
 
-初始 `FileSystem` 仅有只读 `read_dir`；它暂时一次返回最多 10,000 项，超过时明确报错。
-目前串行处理目录请求，不支持读取中的取消。分批目录流、取消和写入能力随 P0-FS 引入，
-不应把当前简化接口视为最终设计。符号链接只展示，不进入其指向的目录。
+`FileSystem` 已包含读写及元数据接口；目录读取暂时一次返回最多 10,000 项，超过时明确报错。
+TUI 服务目前串行处理目录请求，尚无读取取消按键；底层目录读取和传输 API 已覆盖取消清理。
+分批目录流留待 MVP。文件面板的符号链接只展示，不进入其指向的目录。
 
 ## 代码结构
 
 ```text
 crates/
-  common/    路径、端点、文件类型、只读 FileSystem 与 LocalFs
-  ssh/       配置解析、主机信任、Prompt Broker、连接与私钥认证
-  transfer/  传输请求与任务状态类型，尚无调度实现
+  common/    字节路径、端点、元数据、FileSystem、LocalFs 与 FsResolver
+  ssh/       配置、主机信任、认证、PTY 与 SFTP v3 客户端
+  transfer/  规划、冲突决策、目标锁、有界中继、取消与原子提交
   tui/       relay 程序、输入、状态、绘制及 services 编排
 scripts/          真实终端交互检查
 tests/integration/  可控 OpenSSH A/B/C 测试环境
@@ -182,9 +183,43 @@ cargo run --locked -- --ssh-config ALIAS /path/to/ssh_config [--fallback] [--esc
 - 审核修复新增 10 项回归测试：读取取消后重试保持完整字节序列，动态缩小读取上限及零长度读取不丢失预读数据，短读无重复/遗漏；目录遍历取消及 `OPENDIR` 句柄晚到均关闭句柄；每客户端最多 64 个排队/待回复请求，超时（含外部取消后的请求）终止 SFTP 通道并拒绝后续请求；小于 4 KiB 的服务端读写限制与完整包长上限均被遵守，不可用限制被拒绝；本地文件/目录时间戳正确修改并保留未指定字段。取消、超时和资源上限的约定见架构 §6.3。
 - 可编程 `Quirky-SFTP` 异常服务端测试：覆盖不广播扩展时 `AtomicReplace` 返回 `FsError::Unsupported`、`fsync` 返回 `SyncOutcome::Unsupported`、`statvfs` 返回 `None`；过滤 `.`、`..`、空名、含 `/` 或 NUL 的恶意目录项；超 10,000 项大目录报错并关闭句柄；超长帧头、未知 `request_id`、中途断线与慢响应取消。
 - 真实 OpenSSH 容器集成测试（`sftp_filesystem_and_1gib_streaming_against_real_openssh`）：验证能力探测、目录与文件增删改查、权限拒绝（`/root` 及 `0500` 目录）与路径不存在、非 UTF-8 文件名（`b"non-utf8-\xff-\xfe-\x80.bin"`）原样字节往返、`NoReplace` 与 `posix-rename` `AtomicReplace` 覆盖，以及 1 GiB 流式读写（Release 模式下写入耗时 4.39 s / 233.2 MiB/s，读取耗时 2.98 s / 343.6 MiB/s，峰值 RSS 增量 804 KiB；Debug 模式下峰值 RSS 增量 1292 KiB）。
-- 下一步为 P0-04 跨主机文件传输（Remote A → Relay 有界缓冲 → Remote B 及同连接/独立连接终端延迟测量）。
+- 后续 P0-04 的跨主机中继及同连接/独立连接终端延迟验收结果见下节。
 
 本次变更的 Windows/macOS/WSL2 和远端 CI 尚待实际执行。
+
+### P0-04 跨主机文件传输（2026-10-21）
+
+Linux x86_64（kernel 7.0.0-34-generic）、Rust 1.97.1，使用现有 OpenSSH A/B/C Docker 测试环境。三台主机密钥认证及六个方向的 DNS/TCP 22 隔离通过，复制由本机 Relay 中继，两端不直接连接。
+
+验证通过 64 项常规测试（含 13 项传输测试）、5 项真实 OpenSSH 集成测试，以及 Release TUI/SSH 冒烟；格式检查、Clippy、Release 构建、Rust 1.89 MSRV 检查与离线 cargo-deny 通过。离线依赖检查使用已有公告数据库，保留仓库已有的多版本依赖警告。
+
+传输原型经 `common::FileSystem` 解耦 SSH：规划源/目标、处理覆盖冲突并锁定规范化目标路径；以 `0600` 和 `create_new` 创建同目录临时文件，通过有界队列读写，随后 sync、校验字节数/源大小和 mtime/目标大小、设置元数据，最后以 `NoReplace` 或 `AtomicReplace` 提交。不支持原子覆盖时在写入前拒绝；错误只清理本 Item 创建的临时文件，删除失败报告残留路径。规划和读写可取消；同步结束及提交前再次检查取消，提交开始后等待结果。已覆盖临时文件冲突、规划后目标出现、提交失败、源修改、读取停滞、任务退出及网络中断。
+
+复验命令：
+
+```sh
+cargo test --workspace --locked
+cargo test --workspace --locked -- --ignored
+cargo test -p tui --release --locked real_openssh_cross_host_transfer_and_pty_latency -- --ignored --nocapture
+```
+
+Release 独立基线使用 2 个 Tokio worker、一个 Job / 一个活动 Item，默认 chunk=64 KiB、K=4（256 KiB 队列）、SFTP 读写各最多 8 个请求。源为新建的 128 MiB 随机文件（队列的 512 倍），先做源 SHA-256，再在共享 SSH 连接上复制，随后用 A 的独立 SSH 传输连接原子覆盖同一目标。两次目标 SHA-256 均与源一致；散列校验不计入复制耗时。源页缓存已由生成和散列读取预热，结果不是冷盘或 WAN 性能。
+
+| 模式 | 复制耗时 | 吞吐 | PTY p50 | PTY p99 / max | 样本数 |
+| --- | --- | --- | --- | --- | --- |
+| 空闲交互式 Shell | — | — | 0.24 ms | 0.30 ms | 30 |
+| 同一 SSH 连接：PTY + SFTP | 1.15 s | 111.5 MiB/s | 1.72 ms | 8.08 ms | 64 |
+| 独立 SSH 传输连接，PTY 保留原连接 | 0.81 s | 157.5 MiB/s | 0.77 ms | 3.28 ms | 49 |
+
+回显探针向真实交互式 Shell 输入唯一文本行，等待 VT 屏幕出现文本，并每轮间隔 15 ms；单次探针超时为 5 s，整个测试为 90 s。分位数来自单次本机测试，小样本下 p99 等于 max，不能据此承诺长期尾延迟。两种模式中每 5 ms 采样客户端 RSS，峰值增量为 **3336 KiB**（包括额外传输连接的建立，不包括服务器和内核页缓存）；固定队列与流水线使单 Item 缓冲不随文件大小增长。
+
+同一个真实测试还验证了传输中取消得到 `Cancelled`、删除自有临时文件，断开 B 的传输连接得到 `Interrupted`；两种情况下旧目标内容均保持不变。单元测试验证无 `posix-rename` 时拒绝覆盖、原子提交失败及临时文件冲突均不破坏旧文件。ADR-011 因而保留共享连接为默认，独立传输连接为显式可选方向。
+
+范围与风险：
+
+- 这是引擎与 Linux 技术验收；尚无传输队列 UI、全局并发调度、任务持久化和自动重试。一个 Job 内串行执行 Item；多 Job 调用方必须共享 `TargetLocks`。真实 WAN、多任务和其他操作系统仍待验证。
+- Basic 不等于散列校验，不能检测大小及 mtime 均未变化的源内容改写；本次验收额外使用两端 SHA-256。协作式取消提供清理，直接 abort/退出进程可能留下 `.part`。
+- 连接在 rename 应答前丢失时提交结果可能不确定，必须报告中断并重连核实；不自动重试覆盖。无 fsync 时记录 `SyncOutcome::Unsupported`，不宣称已确认落盘。
 
 仓库尚未选择代码许可证，所有 crate 禁止发布。
 `cargo-deny` 只对这些私有 workspace crate 跳过许可证要求，第三方依赖仍进行许可证与漏洞检查。

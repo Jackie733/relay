@@ -4,7 +4,7 @@
 
 Relay（暂定产品名）是一款计划使用 Rust 构建的、以键盘操作为核心的 SSH TUI 工作台。目标是在一个应用中管理 SSH 主机、运行真实的交互式终端、浏览本地与远程文件，并在任意两台可连接的主机之间安全地传输文件。
 
-**当前状态：工程脚手架 + P0-01 SSH 连接原型 + P0-02 交互式 PTY 终端 + P0-03 SFTP 文件接口。** 已有可运行的终端界面、四个工作空间切换和本地/远程双栏目录浏览。`ssh`、`common` 与 `tui` 已实现主机信任、密钥认证、交互式 SSH PTY、VT 终端仿真（`vt100` + 设备查询应答）、按键编码、`Terminal Input` / `Control` 焦点切换，以及自研精简 SFTP v3 客户端与统一 `FileSystem` 接口（可通过 `relay --ssh ...` 启动），尚未接入 Hosts UI 与跨主机传输队列（P0-04）。下文产品目标及设计文档不代表全部已交付功能。
+**当前状态：工程脚手架 + P0-01 SSH 连接原型 + P0-02 交互式 PTY 终端 + P0-03 SFTP 文件接口 + P0-04 跨主机传输原型。** 已有可运行的终端界面、四个工作空间切换和本地/远程双栏目录浏览。`ssh`、`common` 与 `tui` 已实现主机信任、密钥认证、交互式 SSH PTY、VT 终端仿真（`vt100` + 设备查询应答）、按键编码、`Terminal Input` / `Control` 焦点切换，以及自研精简 SFTP v3 客户端与统一 `FileSystem` 接口（可通过 `relay --ssh ...` 启动）。`transfer` 提供有界中继、取消与原子提交，已通过真实双主机复制和终端延迟验收；尚未接入 Hosts UI 与传输队列 UI。P0-00 的 Windows/WSL2 后端验证仍待完成，下文产品目标及设计文档不代表全部已交付功能。
 
 ## 开始开发
 
@@ -72,9 +72,9 @@ cargo run --locked -- /path/to/directory
 | [测试与验收](docs/QUALITY.md) | 集成环境、功能矩阵、故障与性能要求 |
 | [竞品与技术调研](docs/RESEARCH.md) | termscp、sshm-rs 及差异化依据 |
 
-## 技术方向（SSH / SFTP 等核心链路待 P0 验证）
+## 技术方向
 
-已使用 Rust 2024、Ratatui、Crossterm 和 Tokio；P0-01 已引入锁定的 russh 0.64.1 与 ring 后端，支持 Ed25519/ECDSA 密钥，RSA 暂禁用。后续接入 SFTP 客户端（优先自研精简 SFTP v3，P0 验证后定案，改造 russh-sftp 为备选）及 VT 终端仿真组件。设计采用可共享的应用核心、独立 SSH 会话管理器、自研主机信任模块、统一文件系统接口和后台任务引擎。加密后端的 Windows/WSL2 验证仍待完成。
+已使用 Rust 2024、Ratatui、Crossterm 和 Tokio；SSH 锁定 russh 0.64.1 与 ring 后端，支持 Ed25519/ECDSA 密钥，RSA 暂禁用。终端仿真采用 `vt100 0.18.1`，SFTP 采用自研精简 v3 客户端；`transfer` 通过统一文件接口实现有界中继与原子提交。核心链路已通过 Linux P0 原型验收，独立会话管理器和传输队列 UI 留给 MVP；加密后端的 Windows/WSL2 验证仍待完成。
 
 ## 目标平台
 

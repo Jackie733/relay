@@ -2308,7 +2308,11 @@ dependencies = [
 name = "transfer"
 version = "0.1.0-dev"
 dependencies = [
+ "async-trait",
  "common",
+ "tempfile",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

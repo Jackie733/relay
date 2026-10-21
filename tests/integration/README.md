@@ -2,7 +2,7 @@
 
 三个独立 Docker bridge 网络分别放置 OpenSSH A/B/C，端口只绑定本机
 `127.0.0.1:2221/2222/2223`。A/B 不共享容器网络；Relay 从本机分别访问。
-此处提供 P0-01/P0-02 SSH 与交互式 PTY 验证环境（含 `vim`、`htop`、`tmux`、`less` 与 `C.UTF-8` locale）；SFTP 和传输测试后续添加。
+此处提供 P0-01 至 P0-04 的 SSH、交互式 PTY、SFTP 及跨主机传输验证环境（含 `vim`、`htop`、`tmux`、`less` 与 `C.UTF-8` locale）。
 
 要求 Docker Compose v2（支持 `up --wait`）、本机 OpenSSH 客户端及 POSIX shell。
 
@@ -28,4 +28,4 @@ TCP 探测先连接各容器自身的 SSH 监听端口，避免探测工具失�
 Compose 为每个服务生成独立镜像标签，避免并行构建写入同一标签的冲突。
 `crates/ssh/tests/openssh.rs` 另行验证 Relay 自己的主机信任、认证、口令与取消，
 仅连接本机端口并使用临时信任库；常规 `cargo test` 默认跳过，CI 的 ssh-fixtures 任务显式执行。
-PTY、SFTP 读写及传输故障测试随对应功能添加。不要在这里使用真实主机配置或生产密钥。
+`crates/ssh/tests/openssh.rs` 覆盖 PTY、SFTP 与 1 GiB 流式读写；`crates/tui/src/session.rs` 覆盖终端程序、128 MiB A → Relay → B 中继、同连接/独立连接的终端延迟、取消和传输连接断开。后者使用独立临时目录与两端 SHA-256 校验，性能复验命令及解释见开发指南 P0-04。不要在这里使用真实主机配置或生产密钥。

@@ -642,4 +642,452 @@ mod tests {
         drop(app);
         connection.disconnect().await.unwrap();
     }
+
+    async fn connect_port(root: &std::path::Path, id: &str, port: u16) -> ssh::Connection {
+        let options = ssh::ConnectOptions::new(
+            ssh::HostProfile {
+                id: common::HostId(id.into()),
+                hostname: "127.0.0.1".into(),
+                port,
+                username: "relay".into(),
+            },
+            ssh::TrustStore {
+                sources: vec![
+                    root.join(format!("user-{port}")),
+                    root.join(format!("global-{port}")),
+                ],
+                relay_file: root.join(format!("relay-{port}")),
+            },
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/integration/.fixtures/id_ed25519"),
+        );
+        let (broker, mut prompts) = ssh::PromptBroker::channel(1);
+        let mut connect = tokio::spawn(ssh::Connection::connect(options, broker));
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                tokio::select! {
+                    result = &mut connect => return result.unwrap().unwrap(),
+                    Some(prompt) = prompts.recv() => {
+                        assert!(matches!(prompt.kind, ssh::PromptKind::HostKey { .. }));
+                        prompt.response.send(ssh::PromptResponse::Trust).unwrap();
+                    }
+                }
+            }
+        })
+        .await
+        .expect("fixture connection timed out")
+    }
+
+    async fn exec_stdout(conn: &ssh::Connection, cmd: &str) -> String {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let (mut reader, _writer) = conn
+                .open_pty(PtySize::new(200, 24), ssh::PtyCommand::Exec(cmd.into()))
+                .await
+                .unwrap();
+            let mut out = Vec::new();
+            let mut code = None;
+            while let Some(event) = reader.next().await {
+                match event {
+                    PtyEvent::Output(data) => out.extend_from_slice(&data),
+                    PtyEvent::Exited(status) => code = Some(status),
+                    PtyEvent::Closed => break,
+                    _ => {}
+                }
+            }
+            assert_eq!(code, Some(0), "remote command failed: {cmd}");
+            String::from_utf8(out).unwrap().trim().to_owned()
+        })
+        .await
+        .expect("fixture command timed out")
+    }
+
+    fn current_rss_kib() -> Option<u64> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                return rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|num| num.parse::<u64>().ok());
+            }
+        }
+        None
+    }
+
+    fn percentiles_ms(mut samples_us: Vec<u64>) -> (f64, f64, f64) {
+        samples_us.sort_unstable();
+        assert!(
+            !samples_us.is_empty(),
+            "latency benchmark collected no samples"
+        );
+        let p50 = samples_us[samples_us.len() * 50 / 100] as f64 / 1000.0;
+        let p99 =
+            samples_us[(samples_us.len() * 99 / 100).min(samples_us.len() - 1)] as f64 / 1000.0;
+        let max = *samples_us.last().unwrap() as f64 / 1000.0;
+        (p50, p99, max)
+    }
+
+    async fn measure_pty_echo_us(
+        session: &TerminalSession,
+        updated: &Arc<Notify>,
+        token: &str,
+    ) -> u64 {
+        let start = std::time::Instant::now();
+        session.send(format!("{token}\n").into_bytes()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if session.state().emulator.screen().contents().contains(token) {
+                    return;
+                }
+                let _ = tokio::time::timeout(Duration::from_millis(10), updated.notified()).await;
+            }
+        })
+        .await
+        .expect("PTY echo timed out");
+        start.elapsed().as_micros() as u64
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires tests/integration OpenSSH containers on localhost:2221/2222"]
+    async fn real_openssh_cross_host_transfer_and_pty_latency() {
+        tokio::time::timeout(
+            Duration::from_secs(90),
+            cross_host_transfer_and_pty_latency(),
+        )
+        .await
+        .expect("P0-04 integration test timed out");
+    }
+
+    async fn cross_host_transfer_and_pty_latency() {
+        use common::{Endpoint, FileSystem, FsPath, FsResolver, HostId, RemotePath, WriteOptions};
+        use ssh::PtyCommand;
+        use transfer::{
+            CancelToken, ConflictPolicy, JobState, TargetLocks, TransferConfig, TransferRequest,
+            run_transfer,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let conn_a = Arc::new(connect_port(root.path(), "ssh:a", 2221).await);
+        let conn_b = Arc::new(connect_port(root.path(), "ssh:b", 2222).await);
+
+        // A random 128 MiB file is 512x larger than the 256 KiB relay queue.
+        let work_dir = format!(
+            "/tmp/relay-p0-04-{}",
+            root.path().file_name().unwrap().to_str().unwrap()
+        );
+        let src_raw = format!("{work_dir}/source.bin");
+        let dst_same_raw = format!("{work_dir}/destination.bin");
+        let keep_raw = format!("{work_dir}/keep.bin");
+        eprintln!("P0-04: preparing isolated fixtures");
+        exec_stdout(
+            &conn_a,
+            &format!("mkdir -m 700 {work_dir} && head -c 134217728 /dev/urandom > {src_raw}"),
+        )
+        .await;
+        exec_stdout(&conn_b, &format!("mkdir -m 700 {work_dir}")).await;
+        let src_sha = exec_stdout(&conn_a, &format!("sha256sum {src_raw}"))
+            .await
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_owned();
+
+        // Start interactive PTY on OpenSSH-A for latency measurements.
+        let updated = Arc::new(Notify::new());
+        let (reader, writer) = conn_a
+            .open_pty(PtySize::new(80, 24), PtyCommand::Shell)
+            .await
+            .unwrap();
+        let pty = TerminalSession::start_ssh(
+            "relay@a".into(),
+            PtySize::new(80, 24),
+            updated.clone(),
+            reader,
+            writer,
+        );
+        let _ = measure_pty_echo_us(&pty, &updated, "pty-ready-0").await;
+
+        // 1. Measure idle PTY echo latency (30 keystrokes).
+        let mut idle_samples = Vec::new();
+        for i in 0..30 {
+            idle_samples.push(measure_pty_echo_us(&pty, &updated, &format!("idle-echo-{i}")).await);
+        }
+        let (idle_p50, idle_p99, idle_max) = percentiles_ms(idle_samples);
+
+        // 2. Same-connection 128 MiB A -> Relay bounded buffer (4 * 64 KiB = 256 KiB) -> B transfer.
+        let fs_a_same = Arc::new(conn_a.open_sftp().await.unwrap());
+        let fs_b = Arc::new(conn_b.open_sftp().await.unwrap());
+        let resolver_same = FsResolver::new();
+        resolver_same.register_remote(HostId("ssh:a".into()), fs_a_same);
+        resolver_same.register_remote(HostId("ssh:b".into()), fs_b.clone());
+
+        let config = TransferConfig {
+            chunk_size: 64 * 1024,
+            channel_chunks: 4, // 256 KiB bounded buffer (file is 512x larger)
+            ..TransferConfig::default()
+        };
+        let locks = TargetLocks::new();
+        let cancel = CancelToken::new();
+        let req_same = TransferRequest::new(
+            "same-conn",
+            Endpoint::remote(
+                HostId("ssh:a".into()),
+                RemotePath::from_posix(&src_raw).unwrap(),
+            ),
+            Endpoint::remote(
+                HostId("ssh:b".into()),
+                RemotePath::from_posix(&dst_same_raw).unwrap(),
+            ),
+        );
+
+        let rss_before = current_rss_kib().unwrap_or(0);
+        let peak_rss_delta = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let peak_clone = peak_rss_delta.clone();
+        let (stop_sampling, mut sampling_stopped) = tokio::sync::oneshot::channel::<()>();
+        let sampler = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut sampling_stopped => break,
+                    _ = tokio::time::sleep(Duration::from_millis(5)) => {
+                        if let Some(rss) = current_rss_kib() {
+                            peak_clone.fetch_max(rss.saturating_sub(rss_before), std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+        });
+        let same_start = std::time::Instant::now();
+        let tx_handle = {
+            let resolver = resolver_same.clone();
+            let config = config.clone();
+            let locks = locks.clone();
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                run_transfer(
+                    &resolver,
+                    &config,
+                    &locks,
+                    req_same,
+                    ConflictPolicy::Overwrite,
+                    &cancel,
+                    |_| {},
+                )
+                .await
+            })
+        };
+
+        let mut same_samples = Vec::new();
+        let mut seq = 0usize;
+        while !tx_handle.is_finished() {
+            same_samples
+                .push(measure_pty_echo_us(&pty, &updated, &format!("same-echo-{seq}")).await);
+            seq += 1;
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        let report_same = tx_handle.await.unwrap().unwrap();
+        let same_elapsed = same_start.elapsed();
+        assert_eq!(report_same.state, JobState::Completed);
+        assert_eq!(report_same.bytes_transferred, 134_217_728);
+        let dst_same_sha = exec_stdout(&conn_b, &format!("sha256sum {dst_same_raw}"))
+            .await
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_eq!(dst_same_sha, src_sha);
+        let same_sample_count = same_samples.len();
+        let (same_p50, same_p99, same_max) = percentiles_ms(same_samples);
+
+        // 3. Dedicated-connection 128 MiB A -> B transfer + atomic overwrite verification.
+        eprintln!("P0-04: same-connection transfer verified; opening trusted dedicated connection");
+        let conn_a_ded = Arc::new(connect_port(root.path(), "ssh:a", 2221).await);
+        let fs_a_ded = Arc::new(conn_a_ded.open_sftp().await.unwrap());
+        let resolver_ded = FsResolver::new();
+        resolver_ded.register_remote(HostId("ssh:a".into()), fs_a_ded);
+        resolver_ded.register_remote(HostId("ssh:b".into()), fs_b.clone());
+
+        let req_ded = TransferRequest::new(
+            "ded-conn",
+            Endpoint::remote(
+                HostId("ssh:a".into()),
+                RemotePath::from_posix(&src_raw).unwrap(),
+            ),
+            Endpoint::remote(
+                HostId("ssh:b".into()),
+                RemotePath::from_posix(&dst_same_raw).unwrap(),
+            ),
+        );
+        let ded_start = std::time::Instant::now();
+        let tx_ded_handle = {
+            let resolver = resolver_ded.clone();
+            let config = config.clone();
+            let locks = locks.clone();
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                run_transfer(
+                    &resolver,
+                    &config,
+                    &locks,
+                    req_ded,
+                    ConflictPolicy::Overwrite,
+                    &cancel,
+                    |_| {},
+                )
+                .await
+            })
+        };
+
+        let mut ded_samples = Vec::new();
+        seq = 0;
+        while !tx_ded_handle.is_finished() {
+            ded_samples.push(measure_pty_echo_us(&pty, &updated, &format!("ded-echo-{seq}")).await);
+            seq += 1;
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        let report_ded = tx_ded_handle.await.unwrap().unwrap();
+        let ded_elapsed = ded_start.elapsed();
+        assert_eq!(report_ded.state, JobState::Completed);
+        let dst_overwritten_sha = exec_stdout(&conn_b, &format!("sha256sum {dst_same_raw}"))
+            .await
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_eq!(dst_overwritten_sha, src_sha);
+        let ded_sample_count = ded_samples.len();
+        let (ded_p50, ded_p99, ded_max) = percentiles_ms(ded_samples);
+
+        let _ = stop_sampling.send(());
+        sampler.await.unwrap();
+        let peak_kib = peak_rss_delta.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            peak_kib < 64 * 1024,
+            "peak RSS delta {peak_kib} KiB exceeded bounded memory limit"
+        );
+        eprintln!(
+            "P0-04 128 MiB A->B baseline:\n  same-conn: {:.2}s ({:.1} MiB/s), PTY echo p50={:.2}ms p99={:.2}ms max={:.2}ms n={}\n  ded-conn:  {:.2}s ({:.1} MiB/s), PTY echo p50={:.2}ms p99={:.2}ms max={:.2}ms n={}\n  idle PTY:  p50={:.2}ms p99={:.2}ms max={:.2}ms n=30, peak_rss_delta={} KiB",
+            same_elapsed.as_secs_f64(),
+            128.0 / same_elapsed.as_secs_f64(),
+            same_p50,
+            same_p99,
+            same_max,
+            same_sample_count,
+            ded_elapsed.as_secs_f64(),
+            128.0 / ded_elapsed.as_secs_f64(),
+            ded_p50,
+            ded_p99,
+            ded_max,
+            ded_sample_count,
+            idle_p50,
+            idle_p99,
+            idle_max,
+            peak_kib,
+        );
+
+        // 4. Cancellation mid-transfer preserves old target and cleans up `.part` file.
+        let keep_path = FsPath::Remote(RemotePath::from_posix(&keep_raw).unwrap());
+        let mut w = fs_b
+            .open_write(&keep_path, WriteOptions::overwrite(0o600))
+            .await
+            .unwrap();
+        w.write_all(b"intact-before-cancel").await.unwrap();
+        w.close().await.unwrap();
+
+        let cancel_mid = CancelToken::new();
+        let cancel_trigger = cancel_mid.clone();
+        let req_cancel = TransferRequest::new(
+            "cancel-job",
+            Endpoint::remote(
+                HostId("ssh:a".into()),
+                RemotePath::from_posix(&src_raw).unwrap(),
+            ),
+            Endpoint::remote(
+                HostId("ssh:b".into()),
+                RemotePath::from_posix(&keep_raw).unwrap(),
+            ),
+        );
+        let cancel_report = run_transfer(
+            &resolver_ded,
+            &config,
+            &locks,
+            req_cancel,
+            ConflictPolicy::Overwrite,
+            &cancel_mid,
+            move |prog| {
+                if prog.bytes_transferred >= 2 * 1024 * 1024 {
+                    cancel_trigger.cancel();
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(cancel_report.state, JobState::Cancelled);
+        assert!(cancel_report.residual_temp_files.is_empty());
+        assert_eq!(
+            exec_stdout(&conn_b, &format!("cat {keep_raw}")).await,
+            "intact-before-cancel"
+        );
+
+        // 5. Connection drop mid-transfer reports Interrupted and preserves old target (P0-TX-03).
+        let conn_b_drop = connect_port(root.path(), "ssh:b-drop", 2222).await;
+        let fs_b_drop = Arc::new(conn_b_drop.open_sftp().await.unwrap());
+        let resolver_drop = FsResolver::new();
+        resolver_drop.register_remote(
+            HostId("ssh:a".into()),
+            Arc::new(conn_a_ded.open_sftp().await.unwrap()),
+        );
+        resolver_drop.register_remote(HostId("ssh:b-drop".into()), fs_b_drop);
+
+        let (drop_tx, drop_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if drop_rx.await.is_ok() {
+                let _ = conn_b_drop.disconnect().await;
+            }
+        });
+        let mut drop_option = Some(drop_tx);
+        let req_drop = TransferRequest::new(
+            "drop-job",
+            Endpoint::remote(
+                HostId("ssh:a".into()),
+                RemotePath::from_posix(&src_raw).unwrap(),
+            ),
+            Endpoint::remote(
+                HostId("ssh:b-drop".into()),
+                RemotePath::from_posix(&keep_raw).unwrap(),
+            ),
+        );
+        let drop_report = run_transfer(
+            &resolver_drop,
+            &config,
+            &locks,
+            req_drop,
+            ConflictPolicy::Overwrite,
+            &CancelToken::new(),
+            move |prog| {
+                if prog.bytes_transferred >= 2 * 1024 * 1024
+                    && let Some(tx) = drop_option.take()
+                {
+                    let _ = tx.send(());
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(drop_report.state, JobState::Interrupted);
+        assert_eq!(
+            exec_stdout(&conn_b, &format!("cat {keep_raw}")).await,
+            "intact-before-cancel"
+        );
+
+        // Clean up remote test artifacts.
+        exec_stdout(&conn_a, &format!("rm -f {src_raw} && rmdir {work_dir}")).await;
+        exec_stdout(
+            &conn_b,
+            &format!(
+                "rm -f {dst_same_raw} {keep_raw} {work_dir}/.*.relay-*.part && rmdir {work_dir}"
+            ),
+        )
+        .await;
+        drop(pty);
+    }
 }
